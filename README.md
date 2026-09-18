@@ -27,7 +27,7 @@ Blender evaluates natively on every platform.  See
 
 ## Installation
 
-1. Download `sdf_fusion-1.2.0.zip` (or build it, see below).
+1. Download `sdf_fusion-1.3.0.zip` (or build it, see below).
 2. Drag and drop the ZIP into a Blender window, or use
    *Edit > Preferences > Get Extensions > (dropdown) > Install from Disk...*
 3. Enable **SDF Fusion** if it is not enabled automatically.
@@ -80,9 +80,12 @@ SDF Fusion
    **Sphere**, and drag the sphere so it overlaps the box.
 3. Drag **Blend** up: the two shapes melt into each other.  Change **Blend
    Type** for a round fillet, a chamfer or stair steps.
-4. Select a shape and set **Operation** to *Subtract* to cut it out of the
-   result, or *Intersect* to keep only the overlap.  Shapes are combined in
-   list order (see the *Shapes* sub-panel to reorder them).
+4. Select a shape and set **Operation** to *Subtract* to carve it out of the
+   result, or *Intersect* to keep only what lies inside it.  It does not
+   matter which shape you pick: cutters are automatically applied after all
+   Union shapes (*Cutters Last*, in the *Shapes* sub-panel; turn it off for
+   strictly manual top-to-bottom ordering).  A cutter no longer contributes
+   its own surface, so all you see of it is its guide outline.
 5. Scale a shape with **S** to change its size: a box's scale is its half
    extents, a sphere's scale is its radius, a cylinder's XY scale is its
    radius and its Z scale its half height.  Rotation and location work as
@@ -133,7 +136,11 @@ Tips
   modifiers (Remesh, Smooth, Decimate) on top.
 * Per-shape **Custom Blend** lets one shape use, say, a hard subtraction
   while the rest blend smoothly.
-* Deleting a source shape with **X** removes it from the fusion automatically.
+* Deleting a source shape with **X** removes it from the fusion automatically,
+  and **Shift+D** on a shape adds the copy to the same fusion.
+* Source shapes are drawn as light **Guides** (bounds outlines) so they do not
+  hide the fused surface; switch *Guides* to *Wire* in the fusion box if you
+  prefer wireframes.  Shapes can also be selected from the *Shapes* list.
 * The *Shapes* sub-panel has a rebuild button if a tree ever gets out of sync
   (for example after appending objects from another file).
 

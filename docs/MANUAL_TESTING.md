@@ -58,6 +58,17 @@ on your M5 Mac with Blender 5.2 and note anything that misbehaves.
 - [ ] Convert, then render (F12): only the baked mesh renders, with the
       blended material.
 
+## 1.3 additions
+
+- [ ] Box + sphere overlapping.  Select the **box**, press Subtract: the box
+      carves the sphere.  Press Union again, select the **sphere**, press
+      Subtract: the sphere carves the box.  Same with Intersect.
+- [ ] The cutter shows as a light outline (three circles for a sphere) and the
+      carved surface is clearly visible behind it.  *Guides: Wire* brings the
+      wireframes back.
+- [ ] Select one shape, Shift+D, move: the copy is part of the same fusion
+      and appears in the Shapes list.
+
 ## UI / workflow
 
 - [ ] Clicking a row in the *Shapes* sub-panel selects that shape.

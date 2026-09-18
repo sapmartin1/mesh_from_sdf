@@ -147,9 +147,26 @@ Deviations from upstream, on purpose:
   duplicated shapes.  Custom size gizmos were deliberately not added: the
   standard Scale tool already provides per-axis handles for these shapes.
 
+## 3c. 1.3.0: human-facing fixes (reported by Martin)
+
+* **"Subtract only works on one of the two shapes."**  Evaluation is ordered,
+  and the first shape is the base, so switching the first shape to Subtract
+  did nothing.  Shapes are now kept unions-first, then Subtract, then
+  Intersect (stable sort, *Cutters Last*, on by default), so whichever shape
+  is switched becomes a cutter of the whole result.  The panel warns when no
+  Union shape is left.
+* **"It low-polies the selected object."**  A cutter's surface leaves the
+  fused mesh, and what remained visible was its 32-segment wire proxy, which
+  looked like a low-poly version of the shape and hid the cut.  Shapes are
+  now drawn as bounds guides (sphere / cylinder / cone / capsule / box
+  outlines); Wire remains available per fusion.
+* **Shift+D on a shape** now joins the copy to the same fusion (handler
+  adopts shapes that are parented to a fusion but not listed; linked
+  duplicates get their own proxy mesh).
+
 ## 4. Verified
 
-* `tests/run_tests.py` on Blender 5.1.0 / macOS 26 / Apple M5: 115 checks,
+* `tests/run_tests.py` on Blender 5.1.0 / macOS 26 / Apple M5: 129 checks,
   all passing (primitive maths for all 8 primitives, all 15 operation x
   blend combinations, the Phase 1 acceptance flow, analytic volumes, colour
   and material blending, animation drivers, Apply Transform repair,

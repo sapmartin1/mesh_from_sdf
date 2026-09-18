@@ -566,6 +566,38 @@ def iter_shapes(fusion_ob):
         yield ob
 
 
+OP_ORDER = {'UNION': 0, 'SUBTRACT': 1, 'INTERSECT': 2}
+
+
+def apply_auto_order(fusion_ob):
+    """Keep cutters after all unions (stable), so Subtract / Intersect always act
+    on the whole result no matter which shape the user switched."""
+    fs = fusion_ob.sdf_fusion
+    if not fs.auto_order or len(fs.shapes) < 2:
+        return False
+    active = fs.shapes[fs.active_shape_index].object if 0 <= fs.active_shape_index < len(fs.shapes) else None
+    current = [r.object for r in fs.shapes]
+
+    def key(item):
+        i, ob = item
+        if ob is None:
+            return (3, i)
+        return (OP_ORDER.get(ob.sdf_shape.operation, 0), i)
+    desired = [ob for _i, ob in sorted(enumerate(current), key=key)]
+    if desired == current:
+        return False
+    for t, ob in enumerate(desired):
+        c = next(i for i in range(t, len(fs.shapes)) if fs.shapes[i].object == ob)
+        if c != t:
+            fs.shapes.move(c, t)
+    if active is not None:
+        for i, r in enumerate(fs.shapes):
+            if r.object == active:
+                fs['active_shape_index'] = i
+                break
+    return True
+
+
 def get_modifier(fusion_ob, create=True):
     mod = fusion_ob.modifiers.get(MODIFIER_NAME)
     if mod is None and create:
@@ -684,6 +716,7 @@ def max_custom_blend(fusion_ob):
 def rebuild(fusion_ob):
     """(Re)generate the whole modifier tree from the fusion's shape list."""
     settings = fusion_ob.sdf_fusion
+    apply_auto_order(fusion_ob)
     tree = get_tree(fusion_ob)
     if tree.animation_data is not None:
         tree.animation_data_clear()        # drivers of the nodes we are about to delete

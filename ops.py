@@ -105,6 +105,52 @@ def _prism_bmesh(bm, sides):
         bm.faces.new((bottom[k], bottom[j], top[j], top[k]))
 
 
+BOUNDS_TYPE = {
+    'BOX': 'BOX', 'SPHERE': 'SPHERE', 'CYLINDER': 'CYLINDER', 'CONE': 'CONE',
+    'CAPSULE': 'CAPSULE', 'TORUS': 'CYLINDER',
+}
+
+
+def apply_guide_display(fusion, shape=None):
+    """Draw source shapes as unobtrusive guides.  Pyramid and prism keep their
+    (tiny) wire mesh because no bounds type matches their silhouette."""
+    mode = fusion.sdf_fusion.guide_display
+    shapes = [shape] if shape is not None else [r.object for r in fusion.sdf_fusion.shapes]
+    for ob in shapes:
+        if ob is None:
+            continue
+        btype = BOUNDS_TYPE.get(ob.sdf_shape.primitive)
+        if mode == 'BOUNDS' and btype is not None:
+            ob.display_type = 'BOUNDS'
+            ob.display_bounds_type = btype
+        else:
+            ob.display_type = 'WIRE'
+
+
+def adopt_orphan_shapes(scene):
+    """Shift+D on a shape: the copy is parented to the fusion but not listed yet.
+    Returns the fusions that gained shapes."""
+    changed = []
+    listed = {}
+    for ob in scene.objects:
+        if not ob.sdf_shape.enabled or ob.parent is None or not ob.parent.sdf_fusion.enabled:
+            continue
+        fusion = ob.parent
+        members = listed.get(fusion.name)
+        if members is None:
+            members = listed[fusion.name] = {r.object for r in fusion.sdf_fusion.shapes}
+        if ob in members:
+            continue
+        if ob.data is not None and ob.data.users > 1:
+            ob.data = ob.data.copy()          # linked duplicate: own proxy mesh
+        ob.sdf_shape.fusion = fusion
+        fusion.sdf_fusion.shapes.add().object = ob
+        members.add(ob)
+        if fusion not in changed:
+            changed.append(fusion)
+    return changed
+
+
 def fill_proxy_mesh(mesh, primitive, tube=0.25, top_radius=0.0, sides=6):
     """Unit proxy geometry matching the SDF primitive (Z-up, size 2)."""
     bm = bmesh.new()
@@ -332,6 +378,7 @@ def add_shape(context, fusion, primitive, location):
     fill_proxy_mesh(mesh, primitive, st.tube, st.top_radius, st.sides)
     shape.display_type = 'WIRE'
     shape.hide_render = True
+    apply_guide_display(fusion, shape)
     shape.parent = fusion
     shape.matrix_parent_inverse = Matrix.Identity(4)
     shape.matrix_world = Matrix.Translation(Vector(location))

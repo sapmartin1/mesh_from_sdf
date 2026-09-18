@@ -417,6 +417,71 @@ def test_primitive_volumes():
         check(s['islands'] == 1 and rel < 0.06, f"{prim}: volume {s['volume']:.3f} vs analytic {vol:.3f} (rel err {rel:.1%}), {s['islands']} island")
 
 
+def test_cutters_and_guides():
+    print("\n[9] cutters always cut, guide display, Shift+D on a shape")
+    reset_scene()
+    fusion = ops.create_fusion(C, Vector((0, 0, 0)))
+    box = ops.add_shape(C, fusion, 'BOX', Vector((0, 0, 0)))
+    sph = ops.add_shape(C, fusion, 'SPHERE', Vector((1.0, 0.0, 0.6)))
+    fs = fusion.sdf_fusion
+    fs.blend_type = 'NONE'
+    sphere_vol = 4.0 / 3.0 * math.pi
+    # pressing Subtract on the FIRST shape must carve the other one
+    box.sdf_shape.operation = 'SUBTRACT'
+    order = [r.object for r in fs.shapes]
+    check(order == [sph, box], "a shape switched to Subtract moves behind the unions")
+    s = mesh_stats(evaluated_mesh(fusion))
+    check(0.2 < s['volume'] < sphere_vol - 0.2, f"Subtract on the first shape carves the other one ({s['volume']:.3f} < {sphere_vol:.3f})")
+    box.sdf_shape.operation = 'INTERSECT'
+    s2 = mesh_stats(evaluated_mesh(fusion))
+    check(0.2 < s2['volume'] < sphere_vol - 0.2 and abs(s['volume'] + s2['volume'] - sphere_vol) < 0.05,
+          f"Intersect keeps exactly what Subtract removed ({s2['volume']:.3f} + {s['volume']:.3f} = sphere)")
+    box.sdf_shape.operation = 'UNION'
+    sph.sdf_shape.operation = 'SUBTRACT'
+    s3 = mesh_stats(evaluated_mesh(fusion))
+    check(s3['volume'] < 8.0 - 0.2 and [r.object for r in fs.shapes] == [box, sph], f"Subtract on the other shape carves the box ({s3['volume']:.3f} < 8)")
+    # manual ordering still available
+    fs.auto_order = False
+    fs.shapes.move(1, 0)
+    nodes.rebuild(fusion)
+    s4 = mesh_stats(evaluated_mesh(fusion))
+    check(s4['volume'] > 8.0, "with Cutters Last off the order is strictly manual (first shape acts as base)")
+    fs.auto_order = True
+    check([r.object for r in fs.shapes] == [box, sph], "turning Cutters Last back on re-sorts the list")
+
+    # guides
+    check(box.display_type == 'BOUNDS' and box.display_bounds_type == 'BOX' and sph.display_bounds_type == 'SPHERE', "shapes are drawn as bounds guides by default")
+    pyr = ops.add_shape(C, fusion, 'PYRAMID', Vector((0, 2, 0)))
+    check(pyr.display_type == 'WIRE', "pyramid keeps its small wire proxy")
+    fs.guide_display = 'WIRE'
+    check(box.display_type == 'WIRE' and sph.display_type == 'WIRE', "Guides: Wire switches all shapes")
+    fs.guide_display = 'BOUNDS'
+    sph.sdf_shape.primitive = 'CAPSULE'
+    check(sph.display_bounds_type == 'CAPSULE', "changing the primitive updates the guide")
+    sph.sdf_shape.primitive = 'SPHERE'
+
+    # Shift+D on one shape adds the copy to the same fusion
+    n_before = len(fs.shapes)
+    for o in C.view_layer.objects:
+        o.select_set(o == box)
+    C.view_layer.objects.active = box
+    try:
+        bpy.ops.object.duplicate()
+        C.view_layer.update()
+        C.evaluated_depsgraph_get()
+        copies = [o for o in C.scene.objects if o.sdf_shape.enabled and o.parent == fusion and o not in (box, sph, pyr)]
+        check(len(copies) == 1 and len(fs.shapes) == n_before + 1 and copies[0] in [r.object for r in fs.shapes], "Shift+D copy joined the same fusion")
+        cp = copies[0]
+        check(cp.data != box.data and cp.sdf_shape.fusion == fusion, "copy has its own proxy mesh and fusion link")
+        before = mesh_stats(evaluated_mesh(fusion))
+        cp.location.x -= 3.0
+        after = mesh_stats(evaluated_mesh(fusion))
+        check(after['min'][0] < before['min'][0] - 2.5, "moving the copy changes the fused result")
+        check([r.object.sdf_shape.operation for r in fs.shapes] == sorted([r.object.sdf_shape.operation for r in fs.shapes], key=lambda o: nodes.OP_ORDER[o]), "list stays unions-first after adoption")
+    except RuntimeError as e:
+        print("       (object.duplicate unavailable headless:", e, ")")
+
+
 def test_duplicate():
     print("\n[6] duplicate fusion / Shift+D repair")
     reset_scene()
@@ -705,9 +770,11 @@ def test_timing():
 
 def main():
     t0 = time.perf_counter()
-    for test in (test_field_matches_reference, test_acceptance_flow, test_primitive_volumes, test_duplicate, test_animation_and_apply, test_color_blending, test_material_blending, test_timing):
+    for test in (test_field_matches_reference, test_acceptance_flow, test_primitive_volumes, test_cutters_and_guides, test_duplicate, test_animation_and_apply, test_color_blending, test_material_blending, test_timing):
         try:
+            t_start = time.perf_counter()
             test()
+            print(f"       ({test.__name__}: {time.perf_counter() - t_start:.1f}s)")
         except Exception:
             traceback.print_exc()
             FAILURES.append(f"{test.__name__} raised an exception")

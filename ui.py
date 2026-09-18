@@ -64,6 +64,10 @@ class SDFF_PT_main(Panel):
             box.prop(st, 'primitive', text="")
             row = box.row(align=True)
             row.prop(st, 'operation', expand=True)
+            if st.operation == 'SUBTRACT':
+                box.label(text="Carved out of the result", icon='SELECT_SUBTRACT')
+            elif st.operation == 'INTERSECT':
+                box.label(text="Only the part inside this shape is kept", icon='SELECT_INTERSECT')
             row = box.row(align=True)
             row.prop(st, 'color', text="Color")
             row.operator('sdf_fusion.color_from_material', text="", icon='MATERIAL')
@@ -88,6 +92,17 @@ class SDFF_PT_main(Panel):
                     sub.prop(st, 'steps')
 
         fs = fusion.sdf_fusion
+        included = [r.object for r in fs.shapes if r.object is not None and r.object.sdf_shape.include]
+        if included and not any(o.sdf_shape.operation == 'UNION' for o in included):
+            warn = layout.box()
+            warn.alert = True
+            warn.label(text="Nothing to cut: no Union shape", icon='ERROR')
+            warn.label(text="Set at least one shape to Union")
+        elif included and included[0].sdf_shape.operation != 'UNION':
+            warn = layout.box()
+            warn.alert = True
+            warn.label(text="First shape is a cutter, it acts as the base", icon='ERROR')
+            warn.label(text="Enable Cutters Last or reorder the shapes")
         box = layout.box()
         row = box.row()
         row.label(text=fusion.name, icon='MOD_SMOOTH')
@@ -104,6 +119,8 @@ class SDFF_PT_main(Panel):
             col.prop(fs, 'resolution')
         col.prop(fs, 'adaptivity', slider=True)
         col.prop(fs, 'live', toggle=True, icon='PLAY' if fs.live else 'PAUSE')
+        row = box.row(align=True)
+        row.prop(fs, 'guide_display', expand=True)
         col = box.column(align=True)
         col.prop(fs, 'blend_colors', toggle=True, icon='COLOR')
         col.template_ID(fusion, 'active_material', new='material.new')
@@ -180,7 +197,11 @@ class SDFF_PT_shapes(Panel):
         col.operator('sdf_fusion.remove_shape', text="", icon='X')
         col.separator()
         col.operator('sdf_fusion.rebuild', text="", icon='FILE_REFRESH')
-        layout.label(text="Shapes are combined top to bottom", icon='INFO')
+        layout.prop(fs, 'auto_order')
+        if fs.auto_order:
+            layout.label(text="Unions first, then Subtract, then Intersect", icon='INFO')
+        else:
+            layout.label(text="Shapes are combined strictly top to bottom", icon='INFO')
 
 
 classes = (SDFF_UL_shapes, SDFF_PT_main, SDFF_PT_shape_material, SDFF_PT_shapes)

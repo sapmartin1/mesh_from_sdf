@@ -23,6 +23,9 @@ def depsgraph_update_post(scene, depsgraph):
             for ob in scene.objects:
                 if ob.sdf_shape.enabled and ob.type == 'MESH' and ob.data.name in updated_meshes:
                     ops.repair_applied_transform(ob)
+        for fusion in ops.adopt_orphan_shapes(scene):
+            ops.apply_guide_display(fusion)
+            nodes.rebuild(fusion)
         for ob in scene.objects:
             fs = ob.sdf_fusion
             if not fs.enabled:

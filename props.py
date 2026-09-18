@@ -83,6 +83,8 @@ def _shape_primitive(self, context):
     from . import ops
     ob = self.id_data
     ops.refresh_proxy_mesh(ob)
+    if ob.sdf_shape.fusion is not None:
+        ops.apply_guide_display(ob.sdf_shape.fusion, ob)
     _shape_rebuild(self, context)
 
 
@@ -104,6 +106,11 @@ def _fusion_colors(self, context):
     if self.blend_colors:
         ops.ensure_color_material(self.id_data)
         ops.show_attribute_colors(context)
+
+
+def _fusion_guides(self, context):
+    from . import ops
+    ops.apply_guide_display(self.id_data)
 
 
 def _fusion_live(self, context):
@@ -218,6 +225,18 @@ class SDFFusionSettings(PropertyGroup):
                     "emission and cross-fade them over the blend (stored as mesh attributes that "
                     "the generated fusion material reads)",
         update=_fusion_colors)
+    auto_order: BoolProperty(
+        name="Cutters Last", default=True,
+        description="Always apply Subtract and Intersect shapes after all Union shapes, so a "
+                    "cutter carves the whole result whichever shape you switch. Turn off for "
+                    "manual, strictly top-to-bottom ordering",
+        update=_fusion_rebuild)
+    guide_display: EnumProperty(
+        name="Guides", default='BOUNDS',
+        items=(('BOUNDS', 'Bounds', 'Show source shapes as light outline guides'),
+               ('WIRE', 'Wire', 'Show source shapes as wireframe meshes')),
+        description="How the source shapes are drawn in the viewport",
+        update=_fusion_guides)
     live: BoolProperty(
         name="Live Update", default=True,
         description="Recompute the fused mesh while editing (disable on slow scenes)",
