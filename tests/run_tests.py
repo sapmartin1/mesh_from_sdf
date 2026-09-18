@@ -129,6 +129,7 @@ def reference_shapes(fusion):
             'blend': st.blend,
             'blend_type': st.blend_type,
             'steps': st.steps,
+            'sides': st.sides,
         })
     return shapes
 
@@ -162,6 +163,10 @@ def test_field_matches_reference():
         ('CYLINDER', 'UNION', True, 'STEPS', 0.3, 2, 0.0),
         ('CONE', 'SUBTRACT', True, 'CHAMFER', 0.35, 1, 0.0),
         ('TORUS', 'INTERSECT', True, 'ROUND', 0.3, 1, 0.0),
+        ('CAPSULE', 'UNION', False, 'SMOOTH', 0.3, 1, 0.0),
+        ('PYRAMID', 'UNION', True, 'SMOOTH', 0.4, 1, 0.0),
+        ('PRISM', 'SUBTRACT', True, 'ROUND', 0.2, 1, 0.12),
+        ('PRISM', 'UNION', True, 'NONE', 0.0, 1, 0.0),
     ]
     reset_scene()
     fusion = ops.create_fusion(C, Vector((0.5, -0.3, 0.2)))
@@ -174,7 +179,7 @@ def test_field_matches_reference():
     for prim, op, custom, btype, blend, steps, rounding in configs:
         sh = ops.add_shape(C, fusion, prim, Vector((rng.uniform(-1.5, 1.5), rng.uniform(-1.5, 1.5), rng.uniform(-1.5, 1.5))))
         sh.rotation_euler = Euler((rng.uniform(-3, 3), rng.uniform(-3, 3), rng.uniform(-3, 3)))
-        if prim in {'BOX', 'CYLINDER'}:
+        if prim in {'BOX', 'CYLINDER', 'PYRAMID', 'PRISM', 'CAPSULE'}:
             sh.scale = (rng.uniform(0.5, 1.6), rng.uniform(0.5, 1.6), rng.uniform(0.5, 1.6))
         else:
             sh.scale = (rng.uniform(0.5, 1.6),) * 3 if rng.random() < 0.5 else (rng.uniform(0.5, 1.6), rng.uniform(0.5, 1.6), rng.uniform(0.5, 1.6))
@@ -187,6 +192,7 @@ def test_field_matches_reference():
         st.rounding = rounding
         st.tube = 0.3
         st.top_radius = 0.4
+        st.sides = 5 if prim == 'PRISM' and op == 'SUBTRACT' else 6
     C.view_layer.update()
 
     npts = 6000
@@ -359,6 +365,13 @@ def test_acceptance_flow():
     check(rs['verts'] > preview_verts * 2, f"converted mesh uses the final resolution ({rs['verts']} > {preview_verts} preview verts)")
     check(abs(rs['volume'] - sB['volume']) / sB['volume'] < 0.05, f"converted volume matches the preview ({rs['volume']:.3f} vs {sB['volume']:.3f})")
     check(fusion.hide_get() and box.hide_get(), "fusion setup hidden after convert (kept for further edits)")
+    check(fusion.hide_render and box.hide_render, "hidden setup is also disabled in renders")
+    C.view_layer.objects.active = fusion
+    bpy.ops.sdf_fusion.show_setup()
+    check(not fusion.hide_get() and not fusion.hide_render and not box.hide_get(), "Show Fusion Setup restores viewport and render visibility")
+    for ob in (fusion, box, sphere):
+        ob.hide_set(True)
+    fusion.hide_render = True
     check(nodes.get_tree(fusion, create=False).nodes['RESOLUTION'].integer == fs.live_resolution(), "preview resolution restored after convert")
     check(all(p.use_smooth for p in result.data.polygons), "converted mesh is shade smooth")
     check(len(result.data.materials) == 1 and result.data.materials[0] == mat and all(p.material_index == 0 for p in result.data.polygons), "converted mesh keeps the material (single clean slot)")
@@ -390,6 +403,9 @@ def test_primitive_volumes():
         'CYLINDER': math.pi * 2.0,
         'TORUS': 2.0 * math.pi ** 2 * 1.0 * 0.25 ** 2,
         'CONE': math.pi * 1.0 ** 2 * 2.0 / 3.0,
+        'CAPSULE': 4.0 / 3.0 * math.pi,                      # unit capsule (r = h) is a sphere
+        'PYRAMID': 4.0 * 2.0 / 3.0,
+        'PRISM': 3.0 * math.sqrt(3.0) / 2.0 * 2.0,           # hexagon, circumradius 1, height 2
     }
     for prim, vol in expected.items():
         reset_scene()
@@ -399,6 +415,111 @@ def test_primitive_volumes():
         s = mesh_stats(evaluated_mesh(fusion))
         rel = abs(s['volume'] - vol) / vol
         check(s['islands'] == 1 and rel < 0.06, f"{prim}: volume {s['volume']:.3f} vs analytic {vol:.3f} (rel err {rel:.1%}), {s['islands']} island")
+
+
+def test_duplicate():
+    print("\n[6] duplicate fusion / Shift+D repair")
+    reset_scene()
+    fusion = ops.create_fusion(C, Vector((0, 0, 0)))
+    box = ops.add_shape(C, fusion, 'BOX', Vector((0, 0, 0)))
+    sph = ops.add_shape(C, fusion, 'SPHERE', Vector((1.2, 0, 0.6)))
+    fs = fusion.sdf_fusion
+    fs.blend = 0.5
+    C.view_layer.objects.active = fusion
+    bpy.ops.sdf_fusion.duplicate_fusion()
+    copy = C.active_object
+    check(copy is not None and copy != fusion and copy.sdf_fusion.enabled, "Duplicate Fusion creates a new fusion object")
+    check(len(copy.sdf_fusion.shapes) == 2 and all(r.object.parent == copy and r.object.sdf_shape.fusion == copy for r in copy.sdf_fusion.shapes), "copied shapes belong to the copy")
+    check(copy.modifiers[nodes.MODIFIER_NAME].node_group != fusion.modifiers[nodes.MODIFIER_NAME].node_group, "copy has its own node tree")
+    s_orig = mesh_stats(evaluated_mesh(fusion))
+    s_copy = mesh_stats(evaluated_mesh(copy))
+    check(abs(s_orig['volume'] - s_copy['volume']) < 1e-3 and copy.location.x > fusion.location.x + 1.0, "copy evaluates identically, placed beside the original")
+    copy_sph = [r.object for r in copy.sdf_fusion.shapes if r.object.sdf_shape.primitive == 'SPHERE'][0]
+    copy_sph.location.x += 1.0
+    s_orig2 = mesh_stats(evaluated_mesh(fusion))
+    s_copy2 = mesh_stats(evaluated_mesh(copy))
+    check(abs(s_orig2['volume'] - s_orig['volume']) < 1e-6 and s_copy2['max'][0] > s_copy['max'][0] + 0.9, "editing the copy leaves the original untouched")
+
+    # Shift+D style duplicate of fusion + shapes through Blender's own operator
+    for o in C.view_layer.objects:
+        o.select_set(o in (fusion, box, sph))
+    C.view_layer.objects.active = fusion
+    try:
+        bpy.ops.object.duplicate()
+        dup = [o for o in C.scene.objects if o.sdf_fusion.enabled and o not in (fusion, copy)]
+        check(len(dup) == 1, "Blender duplicate produced one more fusion")
+        d = dup[0]
+        d.location.x -= 6.0
+        C.view_layer.update()
+        C.evaluated_depsgraph_get()      # handler: split shared tree / adopt shapes
+        check(d.modifiers[nodes.MODIFIER_NAME].node_group != fusion.modifiers[nodes.MODIFIER_NAME].node_group, "handler gave the Shift+D copy its own tree")
+        check(len(d.sdf_fusion.shapes) == 2 and all(r.object.sdf_shape.fusion == d for r in d.sdf_fusion.shapes), "Shift+D copy owns its duplicated shapes")
+        sd = mesh_stats(evaluated_mesh(d))
+        check(abs(sd['volume'] - s_orig['volume']) < 1e-3, "Shift+D copy evaluates like the original")
+    except RuntimeError as e:
+        print("       (object.duplicate unavailable headless:", e, ")")
+
+
+def test_animation_and_apply():
+    print("\n[7] keyframed settings and Apply Transform repair")
+    reset_scene()
+    scene = C.scene
+    fusion = ops.create_fusion(C, Vector((0, 0, 0)))
+    box = ops.add_shape(C, fusion, 'BOX', Vector((0, 0, 0)))
+    sph = ops.add_shape(C, fusion, 'SPHERE', Vector((1.2, 0, 0.6)))
+    fs = fusion.sdf_fusion
+    fs.blend = 0.0
+    v0 = mesh_stats(evaluated_mesh(fusion))['volume']
+    fs.blend = 0.8
+    v8 = mesh_stats(evaluated_mesh(fusion))['volume']
+    fs.blend = 0.0
+    fusion.keyframe_insert('sdf_fusion.blend', frame=1)
+    fs.blend = 0.8
+    fusion.keyframe_insert('sdf_fusion.blend', frame=21)
+    scene.frame_set(21)
+    va = mesh_stats(evaluated_mesh(fusion))['volume']
+    scene.frame_set(1)
+    vb = mesh_stats(evaluated_mesh(fusion))['volume']
+    scene.frame_set(11)
+    vm = mesh_stats(evaluated_mesh(fusion))['volume']
+    check(abs(va - v8) < 1e-3 and abs(vb - v0) < 1e-3, f"keyframed Blend drives the node tree (frame 21: {va:.3f} vs {v8:.3f}, frame 1: {vb:.3f} vs {v0:.3f})")
+    check(vb < vm < va, f"in-between frame interpolates ({vb:.3f} < {vm:.3f} < {va:.3f})")
+    fusion.animation_data_clear()
+    fs.blend = 0.5
+
+    # keyframed shape colour reaches the mesh
+    fs.blend_colors = True
+    box.sdf_shape.color = (1.0, 0.0, 0.0, 1.0)
+    box.keyframe_insert('sdf_shape.color', frame=1)
+    box.sdf_shape.color = (0.0, 0.0, 1.0, 1.0)
+    box.keyframe_insert('sdf_shape.color', frame=21)
+    scene.frame_set(21)
+    me = evaluated_mesh(fusion)
+    cols = np.array([c.color[:] for c in me.color_attributes[nodes.COLOR_ATTRIBUTE].data])
+    co = np.array([v.co[:] for v in me.vertices])
+    far = cols[co[:, 0] < -0.6][:, :3]
+    check(len(far) > 0 and np.allclose(far, (0, 0, 1), atol=0.03), "keyframed shape colour drives the vertex colours")
+    box.animation_data_clear()
+    scene.frame_set(1)
+    fs.blend_colors = False
+
+    # Apply Scale / Rotation on a shape must not change the fused result
+    box.scale = (2.0, 1.0, 0.5)
+    box.rotation_euler = Euler((0, 0, math.radians(30)))
+    before = mesh_stats(evaluated_mesh(fusion))
+    for o in C.view_layer.objects:
+        o.select_set(o == box)
+    C.view_layer.objects.active = box
+    bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
+    C.view_layer.update()
+    C.evaluated_depsgraph_get()          # handler repairs the proxy
+    after = mesh_stats(evaluated_mesh(fusion))
+    check(np.allclose(box.scale, (2.0, 1.0, 0.5), atol=1e-4), f"Apply Scale folded back into the object scale ({tuple(round(s, 3) for s in box.scale)})")
+    check(abs(box.rotation_euler.z - math.radians(30)) < 1e-4, "Apply Rotation folded back into the object rotation")
+    check(abs(after['volume'] - before['volume']) < 1e-3 and np.allclose(after['min'], before['min'], atol=1e-3), f"fused result unchanged by Apply Transform ({before['volume']:.3f} -> {after['volume']:.3f})")
+    ref = ops.unit_proxy_vertices('BOX', 0.25, 0.0, 6)
+    cur = np.array([v.co[:] for v in box.data.vertices])
+    check(np.allclose(cur, ref, atol=1e-6), "proxy mesh restored to the unit primitive")
 
 
 def test_color_blending():
@@ -500,6 +621,71 @@ def test_color_blending():
     check(nodes.COLOR_ATTRIBUTE not in me5.color_attributes, "Blend Colors off removes the attribute")
 
 
+def test_material_blending():
+    print("\n[8] per-shape materials: metallic / roughness / transmission / IOR / emission")
+    reset_scene()
+    fusion = ops.create_fusion(C, Vector((0, 0, 0)))
+    box = ops.add_shape(C, fusion, 'BOX', Vector((0, 0, 0)))
+    sph = ops.add_shape(C, fusion, 'SPHERE', Vector((1.3, 0.0, 0.7)))
+    sph.scale = (0.8, 0.8, 0.8)
+    fs = fusion.sdf_fusion
+    fs.blend = 0.6
+    fs.quality = 'HIGH'
+
+    def principled_mat(name, color, metallic, roughness, transmission, ior, emission, strength):
+        m = bpy.data.materials.new(name)
+        m.use_nodes = True
+        b = next(n for n in m.node_tree.nodes if n.bl_idname == 'ShaderNodeBsdfPrincipled')
+        b.inputs['Base Color'].default_value = color
+        b.inputs['Metallic'].default_value = metallic
+        b.inputs['Roughness'].default_value = roughness
+        b.inputs['Transmission Weight'].default_value = transmission
+        b.inputs['IOR'].default_value = ior
+        b.inputs['Emission Color'].default_value = emission
+        b.inputs['Emission Strength'].default_value = strength
+        return m
+    mA = principled_mat('A', (1, 0.1, 0.1, 1), 1.0, 0.2, 0.0, 1.45, (0, 0, 0, 1), 0.0)
+    mB = principled_mat('B', (0.1, 0.2, 1, 1), 0.0, 0.9, 0.5, 1.6, (0, 1, 0, 1), 2.0)
+    box.data.materials.append(mA)
+    sph.data.materials.append(mB)
+    box.sdf_shape.use_material = True
+    sph.sdf_shape.use_material = True
+    check(abs(box.sdf_shape.metallic - 1.0) < 1e-6 and abs(sph.sdf_shape.roughness - 0.9) < 1e-6 and abs(sph.sdf_shape.ior - 1.6) < 1e-6,
+          "Use Shape Material pulls Principled values into the shape")
+    fs.blend_colors = True
+    me = evaluated_mesh(fusion)
+    names = {a.name for a in me.attributes}
+    check({nodes.COLOR_ATTRIBUTE, nodes.SURFACE_ATTRIBUTE, nodes.EXTRA_ATTRIBUTE, nodes.EMISSION_ATTRIBUTE} <= names, "surface, extra and emission attributes stored on the mesh")
+    co = np.array([v.co[:] for v in me.vertices])
+    surf = np.array([a.vector[:] for a in me.attributes[nodes.SURFACE_ATTRIBUTE].data])
+    extra = np.array([a.vector[:] for a in me.attributes[nodes.EXTRA_ATTRIBUTE].data])
+    emis = np.array([a.color[:] for a in me.attributes[nodes.EMISSION_ATTRIBUTE].data])
+    far_a, far_b = co[:, 0] < -0.6, co[:, 0] > 1.75
+    check(np.allclose(surf[far_a], (1.0, 0.2, 0.0), atol=0.02) and np.allclose(surf[far_b], (0.0, 0.9, 0.5), atol=0.02), "metallic / roughness / transmission per side")
+    check(np.allclose(extra[far_a][:, :2], (1.45, 0.0), atol=0.02) and np.allclose(extra[far_b][:, :2], (1.6, 2.0), atol=0.02), "IOR / emission strength per side")
+    check(np.allclose(emis[far_b][:, :3], (0, 1, 0), atol=0.02), "emission colour per side")
+    mid = np.sum((surf[:, 0] > 0.2) & (surf[:, 0] < 0.8))
+    check(mid > 30, f"metallic cross-fades across the seam ({mid} in-between vertices)")
+    mat = fusion.active_material
+    kinds = {n.bl_idname for n in mat.node_tree.nodes}
+    check('ShaderNodeAttribute' in kinds and 'ShaderNodeVertexColor' in kinds and mat.name == ops.COLOR_MATERIAL_NAME, "fusion material reads the blended attributes")
+    bsdf = next(n for n in mat.node_tree.nodes if n.bl_idname == 'ShaderNodeBsdfPrincipled')
+    check(all(bsdf.inputs[k].is_linked for k in ('Base Color', 'Metallic', 'Roughness', 'Transmission Weight', 'IOR', 'Emission Color', 'Emission Strength')), "all Principled inputs are driven")
+
+    # editing the shape's material propagates automatically
+    next(n for n in mA.node_tree.nodes if n.bl_idname == 'ShaderNodeBsdfPrincipled').inputs['Roughness'].default_value = 0.7
+    C.view_layer.update()
+    C.evaluated_depsgraph_get()
+    me2 = evaluated_mesh(fusion)
+    surf2 = np.array([a.vector[:] for a in me2.attributes[nodes.SURFACE_ATTRIBUTE].data])
+    co2 = np.array([v.co[:] for v in me2.vertices])
+    check(np.allclose(surf2[co2[:, 0] < -0.6][:, 1], 0.7, atol=0.02), "changing the shape material updates the fusion automatically")
+
+    bpy.ops.sdf_fusion.convert()
+    result = C.active_object
+    check({nodes.SURFACE_ATTRIBUTE, nodes.EXTRA_ATTRIBUTE, nodes.EMISSION_ATTRIBUTE} <= {a.name for a in result.data.attributes}, "converted mesh keeps the material attributes")
+
+
 def test_timing():
     print("\n[4] timings (box + sphere smooth union)")
     reset_scene()
@@ -519,7 +705,7 @@ def test_timing():
 
 def main():
     t0 = time.perf_counter()
-    for test in (test_field_matches_reference, test_acceptance_flow, test_primitive_volumes, test_color_blending, test_timing):
+    for test in (test_field_matches_reference, test_acceptance_flow, test_primitive_volumes, test_duplicate, test_animation_and_apply, test_color_blending, test_material_blending, test_timing):
         try:
             test()
         except Exception:

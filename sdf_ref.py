@@ -119,6 +119,70 @@ def sd_cone(p, s, top_radius=0.0):
     return sgn * np.sqrt(np.minimum(_dot2(ca), _dot2(cb))) * smin
 
 
+def sd_capsule(p, s):
+    """Capsule along Z: radius min(s.x, s.y), total half height s.z (a cylinder rounded by its radius)."""
+    s = np.asarray(s, dtype=np.float64)
+    return sd_cylinder(p, s, rounding=float(np.min(s)))
+
+
+def sd_pyramid(p, s):
+    """Square pyramid: base half extents s.x, s.y at z = -s.z, apex at z = +s.z.
+
+    Port of upstream ``sdPyramid(p, hw, hd, hh)`` (Y-up) with axes remapped to
+    Blender's Z-up.  Exact under non-uniform scale.
+    """
+    s = np.asarray(s, dtype=np.float64)
+    hw, hd, hh = float(s[0]), float(s[1]), float(s[2])
+    x = np.abs(p[..., 0])
+    y = p[..., 2] + hh            # upstream height axis, base at 0
+    z = np.abs(p[..., 1])
+    P = np.stack([x, y, z], axis=-1)
+    corner = np.array([hw, 0.0, hd])
+    lo = np.zeros(3)
+    hi = np.array([hw, 2.0 * hh, hd])
+    d1 = np.stack([np.maximum(x - hw, 0.0), y, np.maximum(z - hd, 0.0)], axis=-1)
+    n1 = np.array([0.0, hd, 2.0 * hh])
+    k1 = float(n1 @ n1)
+    h1 = ((P - corner) @ n1) / k1
+    n2 = np.array([k1, 2.0 * hh * hw, -hd * hw])
+    m1 = ((P - corner) @ n2) / float(n2 @ n2)
+    d2 = P - np.clip(P - n1 * h1[..., None] - n2 * np.maximum(m1, 0.0)[..., None], lo, hi)
+    n3 = np.array([2.0 * hh, hw, 0.0])
+    k2 = float(n3 @ n3)
+    h2 = ((P - corner) @ n3) / k2
+    n4 = np.array([-hw * hd, 2.0 * hh * hd, k2])
+    m2 = ((P - corner) @ n4) / float(n4 @ n4)
+    d3 = P - np.clip(P - n3 * h2[..., None] - n4 * np.maximum(m2, 0.0)[..., None], lo, hi)
+    d = np.sqrt(np.minimum(np.minimum(_dot2(d1), _dot2(d2)), _dot2(d3)))
+    inside = np.maximum(np.maximum(h1, h2), -y) < 0.0
+    return np.where(inside, -d, d)
+
+
+def sd_prism(p, s, sides=6, rounding=0.0):
+    """Regular N-gon prism along Z: circumradius s.xy, half height s.z, optional edge rounding.
+
+    The 2D polygon is Inigo Quilez's closed-form regular polygon (a vertex on +Y),
+    extruded like the cylinder; radial part exact for uniform XY scale.
+    """
+    s = np.asarray(s, dtype=np.float64)
+    n = max(3, int(round(sides)))
+    rmin = float(min(s[0], s[1]))
+    pn = p[..., :2] / s[:2]
+    an = np.pi / n
+    ca, sa = np.cos(an), np.sin(an)
+    bn = np.mod(np.arctan2(pn[..., 0], pn[..., 1]), 2.0 * an) - an
+    L = _length(pn)
+    qx = L * np.cos(bn) - ca
+    qy = L * np.abs(np.sin(bn)) - sa
+    qy = qy + np.clip(-qy, 0.0, sa)
+    d2 = np.sqrt(qx * qx + qy * qy) * np.where(qx < 0.0, -1.0, 1.0) * rmin
+    axial = np.abs(p[..., 2]) - s[2]
+    dx = d2 + rounding
+    dy = axial + rounding
+    d = np.stack([dx, dy], axis=-1)
+    return np.minimum(np.maximum(dx, dy), 0.0) + _length(np.maximum(d, 0.0)) - rounding
+
+
 # ----------------------------------------------------------------------------
 # boolean operators (port of upstream opUnion / opDifference / opIntersection
 # and the Smooth / Round / Champfer / Stairs families)
@@ -243,8 +307,14 @@ def combine(d_new, d_acc, operation, blend_type='NONE', blend=0.0, steps=1):
     raise ValueError(blend_type)
 
 
-def primitive_distance(primitive, p_local, scale, rounding=0.0, tube=0.25, top_radius=0.0):
+def primitive_distance(primitive, p_local, scale, rounding=0.0, tube=0.25, top_radius=0.0, sides=6):
     """Dispatch helper mirroring the node groups."""
+    if primitive == 'CAPSULE':
+        return sd_capsule(p_local, scale)
+    if primitive == 'PYRAMID':
+        return sd_pyramid(p_local, scale)
+    if primitive == 'PRISM':
+        return sd_prism(p_local, scale, sides, rounding)
     if primitive == 'BOX':
         return sd_box(p_local, scale, rounding)
     if primitive == 'SPHERE':
@@ -272,7 +342,8 @@ def evaluate_fusion(points, shapes, global_blend, global_blend_type, global_step
     for i, sh in enumerate(shapes):
         p_local = (pts_h @ np.asarray(sh['matrix_inv_rigid']).T)[..., :3]
         d = primitive_distance(sh['primitive'], p_local, sh['scale'],
-                               sh.get('rounding', 0.0), sh.get('tube', 0.25), sh.get('top_radius', 0.0))
+                               sh.get('rounding', 0.0), sh.get('tube', 0.25), sh.get('top_radius', 0.0),
+                               sh.get('sides', 6))
         if acc is None:
             acc = d
             continue

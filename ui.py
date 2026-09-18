@@ -18,7 +18,8 @@ class SDFF_UL_shapes(UIList):
         st = ob.sdf_shape
         row = layout.row(align=True)
         icon_name = {'BOX': 'MESH_CUBE', 'SPHERE': 'MESH_UVSPHERE', 'CYLINDER': 'MESH_CYLINDER',
-                     'TORUS': 'MESH_TORUS', 'CONE': 'MESH_CONE'}.get(st.primitive, 'MESH_DATA')
+                     'TORUS': 'MESH_TORUS', 'CONE': 'MESH_CONE', 'CAPSULE': 'MESH_CAPSULE',
+                     'PYRAMID': 'CONE', 'PRISM': 'MESH_ICOSPHERE'}.get(st.primitive, 'MESH_DATA')
         row.prop(st, 'include', text="")
         row.label(text=ob.name, icon=icon_name)
         row.prop(st, 'operation', text="", emboss=False, icon_only=True)
@@ -45,6 +46,10 @@ class SDFF_PT_main(Panel):
         row = col.row(align=True)
         row.operator('sdf_fusion.add_shape', text="Torus", icon='MESH_TORUS').primitive = 'TORUS'
         row.operator('sdf_fusion.add_shape', text="Cone", icon='MESH_CONE').primitive = 'CONE'
+        row.operator('sdf_fusion.add_shape', text="Capsule", icon='MESH_CAPSULE').primitive = 'CAPSULE'
+        row = col.row(align=True)
+        row.operator('sdf_fusion.add_shape', text="Pyramid", icon='CONE').primitive = 'PYRAMID'
+        row.operator('sdf_fusion.add_shape', text="Prism", icon='MESH_ICOSPHERE').primitive = 'PRISM'
         row.operator('sdf_fusion.new_fusion', text="", icon='ADD')
 
         if fusion is None:
@@ -62,7 +67,12 @@ class SDFF_PT_main(Panel):
             row = box.row(align=True)
             row.prop(st, 'color', text="Color")
             row.operator('sdf_fusion.color_from_material', text="", icon='MATERIAL')
-            if st.primitive in {'BOX', 'CYLINDER'}:
+            size_label = {'SPHERE': "Diameter", 'TORUS': "Outer Size"}.get(st.primitive, "Size")
+            col = box.column(align=True)
+            col.prop(shape, 'dimensions', text=size_label)
+            if st.primitive == 'PRISM':
+                box.prop(st, 'sides')
+            if st.primitive in {'BOX', 'CYLINDER', 'PRISM'}:
                 box.prop(st, 'rounding', slider=True)
             elif st.primitive == 'TORUS':
                 box.prop(st, 'tube', slider=True)
@@ -82,6 +92,7 @@ class SDFF_PT_main(Panel):
         row = box.row()
         row.label(text=fusion.name, icon='MOD_SMOOTH')
         row.operator('sdf_fusion.select_fusion', text="", icon='RESTRICT_SELECT_OFF')
+        row.operator('sdf_fusion.duplicate_fusion', text="", icon='DUPLICATE')
         col = box.column(align=True)
         col.prop(fs, 'blend', slider=True)
         col.prop(fs, 'blend_type', text="")
@@ -104,6 +115,43 @@ class SDFF_PT_main(Panel):
         row = box.row()
         row.scale_y = 1.4
         row.operator('sdf_fusion.convert', icon='MESH_DATA')
+        if ops.setup_is_hidden(fusion):
+            box.operator('sdf_fusion.show_setup', icon='HIDE_OFF')
+
+
+class SDFF_PT_shape_material(Panel):
+    bl_label = "Shape Material"
+    bl_idname = "SDFF_PT_shape_material"
+    bl_parent_id = "SDFF_PT_main"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "SDF Fusion"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return ops.active_shape(context) is not None
+
+    def draw(self, context):
+        layout = self.layout
+        shape = ops.active_shape(context)
+        st = shape.sdf_shape
+        fusion = st.fusion
+        if fusion is not None and not fusion.sdf_fusion.blend_colors:
+            layout.label(text="Turn on Blend Materials on the fusion", icon='INFO')
+        layout.prop(st, 'use_material', toggle=True, icon='MATERIAL')
+        if st.use_material:
+            layout.template_ID(shape, 'active_material', new='material.new')
+            layout.label(text="Values follow this material's Principled BSDF", icon='LINKED')
+        col = layout.column(align=True)
+        col.enabled = not st.use_material
+        col.prop(st, 'color', text="Color")
+        col.prop(st, 'metallic', slider=True)
+        col.prop(st, 'roughness', slider=True)
+        col.prop(st, 'transmission', slider=True)
+        col.prop(st, 'ior')
+        col.prop(st, 'emission_color', text="Emission")
+        col.prop(st, 'emission_strength')
 
 
 class SDFF_PT_shapes(Panel):
@@ -135,7 +183,7 @@ class SDFF_PT_shapes(Panel):
         layout.label(text="Shapes are combined top to bottom", icon='INFO')
 
 
-classes = (SDFF_UL_shapes, SDFF_PT_main, SDFF_PT_shapes)
+classes = (SDFF_UL_shapes, SDFF_PT_main, SDFF_PT_shape_material, SDFF_PT_shapes)
 
 
 def register():

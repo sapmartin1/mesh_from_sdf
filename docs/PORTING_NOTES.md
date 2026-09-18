@@ -117,11 +117,43 @@ Deviations from upstream, on purpose:
   factor); the colour field is evaluated at the mesh vertices with Store
   Named Attribute ("Color") and a generated material reads it.
 
+## 3b. 1.2.0 additions (issues found in review by Martin / ChatGPT)
+
+* **Render visibility:** *Convert to Mesh* with *Hide Fusion Setup* now also
+  sets *Disable in Renders* on the fusion; *Show Fusion Setup* reverts both.
+* **Animated settings:** property `update` callbacks only fire on user edits,
+  so keyframed values never reached the node tree.  Every scalar/colour node
+  value is now driven by its property (`SUM`/`MAX` drivers with a single
+  `SINGLE_PROP` variable, no Python expressions, so they work with
+  auto-run scripts disabled).  Drivers are cleared and recreated on rebuild.
+* **Apply Scale/Rotation/Location:** sizes come from the object scale, so
+  Ctrl+A silently changed the field.  A depsgraph handler now detects a
+  transformed proxy mesh, recovers the affine transform by least squares
+  against the unit proxy, folds it into the object matrix and restores the
+  unit proxy.  Hand-edited proxies (non-affine) are left alone.
+* **Per-shape materials:** op groups now blend colour, a surface vector
+  (metallic, roughness, transmission), an extra vector (IOR, emission
+  strength) and an emission colour with the same factor as the distances.
+  They are stored as mesh attributes and the generated "SDF Fusion Material"
+  feeds them into a Principled BSDF.  *Use Shape Material* syncs a shape's
+  values from its own material's Principled BSDF (handler on material and
+  object updates).  Blending whole node trees per region is not possible on a
+  single mesh; this is the standard attribute-driven equivalent.
+* **New primitives:** capsule, square pyramid (exact port of upstream
+  `sdPyramid`, Z-up) and regular N-gon prism (closed-form polygon SDF,
+  replaces upstream's per-edge loop, which Geometry Nodes cannot express).
+* **Size fields** (object dimensions) per shape, **Duplicate Fusion**, and a
+  handler that gives Shift+D copies their own node tree and adopts their
+  duplicated shapes.  Custom size gizmos were deliberately not added: the
+  standard Scale tool already provides per-axis handles for these shapes.
+
 ## 4. Verified
 
-* `tests/run_tests.py` on Blender 5.1.0 / macOS 26 / Apple M5: 65 checks,
-  all passing (primitive maths, all 15 operation x blend combinations,
-  the Phase 1 acceptance flow, analytic volumes of each primitive, timings).
+* `tests/run_tests.py` on Blender 5.1.0 / macOS 26 / Apple M5: 115 checks,
+  all passing (primitive maths for all 8 primitives, all 15 operation x
+  blend combinations, the Phase 1 acceptance flow, analytic volumes, colour
+  and material blending, animation drivers, Apply Transform repair,
+  duplicates, timings).
 * `blender --command extension build` / `validate` succeed, and the ZIP
   installs/enables/disables cleanly through the extension system
   (`bl_ext.user_default.sdf_fusion`).
@@ -133,14 +165,10 @@ Deviations from upstream, on purpose:
 
 ## 5. Known limitations / future work
 
-* Duplicating a fusion object with Shift+D duplicates the modifier but the
-  copy still points at the original shapes; use *New Fusion* and add shapes
-  instead (a "duplicate fusion" operator is easy to add later).
-* No per-parameter gizmos (upstream had arrow gizmos); scale handles cover
-  the common cases.
-* Only Box / Sphere / Cylinder / Torus / Cone.  Upstream's pyramid,
-  truncated pyramid, hex/ngon prism, quadratic Bezier and GLSL-file
-  primitives can be added as further node groups from `shader/common.py`.
+* No per-parameter gizmos (upstream had arrow gizmos); the Scale tool and
+  the Size fields cover the common cases.
+* Upstream's truncated pyramid, quadratic Bezier tube and GLSL-file
+  primitives are not ported yet.
 * Materials: the fused mesh has no UVs (marching-cubes style output).
 * Native SDF-grid alternative: Blender 5 also has *Mesh to SDF Grid* and
   *SDF Grid Boolean* nodes.  They were not used because they only offer hard

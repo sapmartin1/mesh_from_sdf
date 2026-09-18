@@ -27,7 +27,7 @@ Blender evaluates natively on every platform.  See
 
 ## Installation
 
-1. Download `sdf_fusion-1.1.0.zip` (or build it, see below).
+1. Download `sdf_fusion-1.2.0.zip` (or build it, see below).
 2. Drag and drop the ZIP into a Blender window, or use
    *Edit > Preferences > Get Extensions > (dropdown) > Install from Disk...*
 3. Enable **SDF Fusion** if it is not enabled automatically.
@@ -46,13 +46,18 @@ The sidebar tab is the whole interface:
 ```
 SDF Fusion
   [ Box ] [ Sphere ] [ Cylinder ]
-  [ Torus ] [ Cone ] [+]
+  [ Torus ] [ Cone ] [ Capsule ]
+  [ Pyramid ] [ Prism ] [+]
 
   <active shape>
-    Primitive      Box / Sphere / Cylinder / Torus / Cone
+    Primitive      Box / Sphere / Cylinder / Torus / Cone / Capsule / Pyramid / Prism
     Operation      Union | Subtract | Intersect
-    Round Edges    (box, cylinder)
+    Color          shape colour (see Materials)
+    Size           X / Y / Z in scene units (edits the object scale)
+    Sides          (prism)   Round Edges (box, cylinder, prism)
     Custom Blend   per-shape blend override
+  Shape Material   (sub-panel) metallic, roughness, transmission, IOR,
+                   emission, or "Use Shape Material" to follow a real material
 
   <fusion>
     Blend          slider
@@ -60,8 +65,9 @@ SDF Fusion
     Quality        Low / Medium / High / Custom     (preview resolution)
     Adaptivity     merge flat areas
     Live Update    pause the live mesh on heavy scenes
-    Blend Colors   per-shape colours that cross-fade over the blend
-    Material       the fusion's material
+    Blend Materials  per-shape colour and surface values that cross-fade
+    Material         the fusion's material
+    (duplicate icon) copy the fusion with all its shapes
 
   Final Resolution
   [ Convert to Mesh ]
@@ -86,20 +92,39 @@ SDF Fusion
    is created at the final resolution; the fusion setup is hidden but kept
    so you can keep editing and convert again.
 
-### Colours
+### Materials
 
 The fused result is one mesh, so it cannot carry one material per source
-shape.  Instead each shape has a **Color** (in the shape box; the material
-icon next to it copies the colour of the shape's own material).  Turn on
-**Blend Colors** in the fusion box: the colours are mixed with the same
-factor as the distances, so they cross-fade over the blend width exactly
+shape.  Instead every shape carries its own surface values: **Color** (in the
+shape box) plus metallic, roughness, transmission, IOR and emission in the
+**Shape Material** sub-panel.  Turn on **Use Shape Material** there to have
+those values follow the Principled BSDF of the shape's own material
+automatically, so you can keep working with real materials per shape.
+
+Turn on **Blend Materials** in the fusion box: all values are mixed with the
+same factor as the distances, so they cross-fade over the blend width exactly
 where the surfaces melt, a hard union switches sharply at the seam, and a
-subtraction paints the cut with the cutter's colour.  The result is stored on
-the mesh as a `Color` attribute; the add-on assigns a material
-("SDF Fusion Colors") that reads it, and switches Solid-mode viewports to
-*Color: Attribute* so it shows immediately.  To use your own material, add a
-*Color Attribute* node (name `Color`) to it, or click **Use Color Material**.
-Convert to Mesh keeps the attribute and the material.
+subtraction paints the cut with the cutter's surface.  The result is stored
+on the mesh as attributes (`Color`, `SDF Surface`, `SDF Extra`,
+`SDF Emission`); the add-on assigns a generated "SDF Fusion Material" that
+feeds them into a Principled BSDF, and switches Solid-mode viewports to
+*Color: Attribute*.  Material Preview or Rendered shading shows the full
+metallic / roughness / transmission / emission blend.  To use your own
+material, read those attributes with *Color Attribute* / *Attribute* nodes,
+or click **Use Color Material**.  Convert to Mesh keeps the attributes and the
+material.
+
+### Animation, Apply Transform, duplicates
+
+* Every setting (Blend, colours, surface values, rounding...) can be
+  keyframed or driven; the node tree follows through drivers.
+* Applying scale, rotation or location to a shape (Ctrl+A) is detected and
+  folded back into the object, so the fused result does not change.
+* The duplicate icon next to the fusion name copies a fusion with all its
+  shapes.  Shift+D on a fusion together with its shapes also works: the copy
+  gets its own node tree automatically.
+* After **Convert to Mesh** the setup is hidden in the viewport *and* in
+  renders; **Show Fusion Setup** brings it back.
 
 Tips
 

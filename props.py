@@ -14,6 +14,9 @@ PRIMITIVE_ITEMS = (
     ('CYLINDER', 'Cylinder', 'Cylinder along Z (scale XY = radius, Z = half height)', 'MESH_CYLINDER', 2),
     ('TORUS', 'Torus', 'Torus in the XY plane (scale = major radius)', 'MESH_TORUS', 3),
     ('CONE', 'Cone', 'Cone along Z (scale XY = base radius, Z = half height)', 'MESH_CONE', 4),
+    ('CAPSULE', 'Capsule', 'Capsule along Z (scale XY = radius, Z = half length)', 'MESH_CAPSULE', 5),
+    ('PYRAMID', 'Pyramid', 'Square pyramid (scale XY = base half extents, Z = half height)', 'CONE', 6),
+    ('PRISM', 'Prism', 'Regular N-gon prism along Z (scale XY = radius, Z = half height)', 'MESH_ICOSPHERE', 7),
 )
 
 OPERATION_ITEMS = (
@@ -59,6 +62,13 @@ def _shape_values(self, context):
     fusion = _shape_fusion(self)
     if fusion is not None:
         nodes.update_shape_values(fusion, self.id_data)
+
+
+def _shape_use_material(self, context):
+    from . import ops
+    if self.use_material:
+        ops.sync_shape_from_material(self.id_data)
+    _shape_values(self, context)
 
 
 def _shape_param(self, context):
@@ -140,6 +150,9 @@ class SDFShapeSettings(PropertyGroup):
         name="Top Radius", default=0.0, min=0.0, max=1.0,
         description="Cone top radius as a fraction of the base radius (0 = sharp cone)",
         update=_shape_param)
+    sides: IntProperty(
+        name="Sides", default=6, min=3, max=32,
+        description="Number of sides of the prism", update=_shape_param)
     use_custom_blend: BoolProperty(
         name="Custom Blend", default=False,
         description="Override the fusion-wide blend for this shape", update=_shape_rebuild)
@@ -153,8 +166,21 @@ class SDFShapeSettings(PropertyGroup):
     color: FloatVectorProperty(
         name="Color", subtype='COLOR', size=4, min=0.0, max=1.0,
         default=(0.8, 0.8, 0.8, 1.0),
-        description="Colour of this shape when the fusion blends colours",
+        description="Colour of this shape when the fusion blends materials",
         update=_shape_values)
+    use_material: BoolProperty(
+        name="Use Shape Material", default=False,
+        description="Take colour, metallic, roughness, transmission, IOR and emission from the "
+                    "Principled BSDF of this shape's own material (kept in sync automatically)",
+        update=_shape_use_material)
+    metallic: FloatProperty(name="Metallic", default=0.0, min=0.0, max=1.0, update=_shape_values)
+    roughness: FloatProperty(name="Roughness", default=0.5, min=0.0, max=1.0, update=_shape_values)
+    transmission: FloatProperty(name="Transmission", default=0.0, min=0.0, max=1.0, update=_shape_values)
+    ior: FloatProperty(name="IOR", default=1.45, min=1.0, soft_max=4.0, update=_shape_values)
+    emission_color: FloatVectorProperty(
+        name="Emission", subtype='COLOR', size=4, min=0.0, max=1.0,
+        default=(1.0, 1.0, 1.0, 1.0), update=_shape_values)
+    emission_strength: FloatProperty(name="Emission Strength", default=0.0, min=0.0, soft_max=10.0, update=_shape_values)
 
 
 class SDFShapeRef(PropertyGroup):
@@ -187,9 +213,10 @@ class SDFFusionSettings(PropertyGroup):
         name="Adaptivity", default=0.0, min=0.0, max=1.0,
         description="Merge flat areas into larger polygons (0 = uniform mesh)", update=_fusion_values)
     blend_colors: BoolProperty(
-        name="Blend Colors", default=False,
-        description="Give every shape its own colour and cross-fade them over the blend "
-                    "(stored as the 'Color' attribute; the fusion material reads it)",
+        name="Blend Materials", default=False,
+        description="Give every shape its own colour, metallic, roughness, transmission, IOR and "
+                    "emission and cross-fade them over the blend (stored as mesh attributes that "
+                    "the generated fusion material reads)",
         update=_fusion_colors)
     live: BoolProperty(
         name="Live Update", default=True,

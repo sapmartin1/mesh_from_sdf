@@ -39,6 +39,25 @@ on your M5 Mac with Blender 5.2 and note anything that misbehaves.
 - [ ] Convert to Mesh, then check the mesh still shows the colours in
       Material Preview and in a Cycles render.
 
+## 1.2 additions
+
+- [ ] Add a Capsule, a Pyramid and a Prism (set Sides to 3, 5, 8); the wire
+      proxies match the fused shapes.
+- [ ] Type values into the **Size** fields of a shape; the result follows.
+- [ ] Keyframe **Blend** (hover, press I) at two frames; scrub the timeline:
+      the fusion animates.  Same for a shape's Color.
+- [ ] Select a shape, scale it, press Ctrl+A > Scale: nothing changes visibly
+      and the object scale is back.  Same with Rotation.
+- [ ] Click the duplicate icon next to the fusion name: an independent copy
+      appears beside it.  Also select a fusion plus its shapes and Shift+D.
+- [ ] Give the box and the sphere real materials (Material tab), open the
+      **Shape Material** sub-panel, enable **Use Shape Material** on both,
+      turn on **Blend Materials**; in Material Preview (Z) metallic,
+      roughness and emission blend across the seam.  Change a material's
+      roughness: the fusion follows.
+- [ ] Convert, then render (F12): only the baked mesh renders, with the
+      blended material.
+
 ## UI / workflow
 
 - [ ] Clicking a row in the *Shapes* sub-panel selects that shape.

@@ -5,6 +5,7 @@ import math
 
 import bmesh
 import bpy
+import numpy as np
 from bpy.props import BoolProperty, EnumProperty
 from bpy.types import Operator
 from mathutils import Matrix, Vector
@@ -12,7 +13,7 @@ from mathutils import Matrix, Vector
 from . import nodes
 from .props import PRIMITIVE_ITEMS
 
-COLOR_MATERIAL_NAME = "SDF Fusion Colors"
+COLOR_MATERIAL_NAME = "SDF Fusion Material"
 
 # default colours handed to new shapes (cycled), pleasant and distinct
 PALETTE = (
@@ -30,6 +31,9 @@ PROXY_NAMES = {
     'CYLINDER': "SDF Cylinder",
     'TORUS': "SDF Torus",
     'CONE': "SDF Cone",
+    'CAPSULE': "SDF Capsule",
+    'PYRAMID': "SDF Pyramid",
+    'PRISM': "SDF Prism",
 }
 
 
@@ -80,10 +84,39 @@ def _torus_bmesh(bm, major=1.0, minor=0.25, segments=32, rings=16):
             bm.faces.new((a, b, c, d))
 
 
-def fill_proxy_mesh(mesh, primitive, tube=0.25, top_radius=0.0):
+def _pyramid_bmesh(bm):
+    v = [bm.verts.new(c) for c in ((-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1), (0, 0, 1))]
+    bm.faces.new((v[0], v[3], v[2], v[1]))
+    for a, b_ in ((0, 1), (1, 2), (2, 3), (3, 0)):
+        bm.faces.new((v[a], v[b_], v[4]))
+
+
+def _prism_bmesh(bm, sides):
+    # a vertex on +Y, matching the closed-form polygon SDF
+    top, bottom = [], []
+    for k in range(sides):
+        a = math.pi / 2.0 + 2.0 * math.pi * k / sides
+        bottom.append(bm.verts.new((math.cos(a), math.sin(a), -1.0)))
+        top.append(bm.verts.new((math.cos(a), math.sin(a), 1.0)))
+    bm.faces.new(list(reversed(bottom)))
+    bm.faces.new(top)
+    for k in range(sides):
+        j = (k + 1) % sides
+        bm.faces.new((bottom[k], bottom[j], top[j], top[k]))
+
+
+def fill_proxy_mesh(mesh, primitive, tube=0.25, top_radius=0.0, sides=6):
     """Unit proxy geometry matching the SDF primitive (Z-up, size 2)."""
     bm = bmesh.new()
-    if primitive == 'BOX':
+    if primitive == 'PYRAMID':
+        _pyramid_bmesh(bm)
+    elif primitive == 'PRISM':
+        _prism_bmesh(bm, max(3, int(sides)))
+    elif primitive == 'CAPSULE':
+        # the capsule is inscribed in this cylinder (its ends are rounded by the radius)
+        bmesh.ops.create_cone(bm, cap_ends=True, cap_tris=False, segments=32,
+                              radius1=1.0, radius2=1.0, depth=2.0)
+    elif primitive == 'BOX':
         bmesh.ops.create_cube(bm, size=2.0)
     elif primitive == 'SPHERE':
         bmesh.ops.create_uvsphere(bm, u_segments=32, v_segments=16, radius=1.0)
@@ -104,7 +137,7 @@ def refresh_proxy_mesh(shape_ob):
     st = shape_ob.sdf_shape
     if shape_ob.type != 'MESH' or not st.enabled:
         return
-    fill_proxy_mesh(shape_ob.data, st.primitive, st.tube, st.top_radius)
+    fill_proxy_mesh(shape_ob.data, st.primitive, st.tube, st.top_radius, st.sides)
 
 
 def _link_like(ob, template, context):
@@ -124,25 +157,111 @@ def material_reads_color_attribute(mat):
 
 
 def make_color_material(name=COLOR_MATERIAL_NAME):
-    """A material whose base colour comes from the fusion's 'Color' attribute."""
+    """A Principled material fed by the fusion's blended attributes."""
     mat = bpy.data.materials.get(name)
-    if mat is not None and material_reads_color_attribute(mat):
+    if mat is not None and material_reads_color_attribute(mat) and mat.get('sdff_material_version') == 2:
         return mat
     mat = mat or bpy.data.materials.new(name)
     mat.use_nodes = True
     nt = mat.node_tree
     nt.nodes.clear()
     out = nt.nodes.new('ShaderNodeOutputMaterial')
-    out.location = (400, 0)
+    out.location = (500, 0)
     bsdf = nt.nodes.new('ShaderNodeBsdfPrincipled')
-    bsdf.location = (0, 0)
-    attr = nt.nodes.new('ShaderNodeVertexColor')
-    attr.layer_name = nodes.COLOR_ATTRIBUTE
-    attr.location = (-300, 0)
-    nt.links.new(attr.outputs['Color'], bsdf.inputs['Base Color'])
+    bsdf.location = (100, 0)
+    col = nt.nodes.new('ShaderNodeVertexColor')
+    col.layer_name = nodes.COLOR_ATTRIBUTE
+    col.location = (-400, 200)
+    nt.links.new(col.outputs['Color'], bsdf.inputs['Base Color'])
+    surf = nt.nodes.new('ShaderNodeAttribute')
+    surf.attribute_type = 'GEOMETRY'
+    surf.attribute_name = nodes.SURFACE_ATTRIBUTE
+    surf.location = (-600, 0)
+    sep = nt.nodes.new('ShaderNodeSeparateXYZ')
+    sep.location = (-400, 0)
+    nt.links.new(surf.outputs['Vector'], sep.inputs[0])
+    nt.links.new(sep.outputs['X'], bsdf.inputs['Metallic'])
+    nt.links.new(sep.outputs['Y'], bsdf.inputs['Roughness'])
+    nt.links.new(sep.outputs['Z'], bsdf.inputs['Transmission Weight'])
+    extra = nt.nodes.new('ShaderNodeAttribute')
+    extra.attribute_type = 'GEOMETRY'
+    extra.attribute_name = nodes.EXTRA_ATTRIBUTE
+    extra.location = (-600, -250)
+    sep2 = nt.nodes.new('ShaderNodeSeparateXYZ')
+    sep2.location = (-400, -250)
+    nt.links.new(extra.outputs['Vector'], sep2.inputs[0])
+    nt.links.new(sep2.outputs['X'], bsdf.inputs['IOR'])
+    nt.links.new(sep2.outputs['Y'], bsdf.inputs['Emission Strength'])
+    emis = nt.nodes.new('ShaderNodeVertexColor')
+    emis.layer_name = nodes.EMISSION_ATTRIBUTE
+    emis.location = (-400, -450)
+    nt.links.new(emis.outputs['Color'], bsdf.inputs['Emission Color'])
     nt.links.new(bsdf.outputs['BSDF'], out.inputs['Surface'])
     mat.diffuse_color = (0.8, 0.8, 0.8, 1.0)
+    mat['sdff_material_version'] = 2
     return mat
+
+
+def _principled(mat):
+    if mat is None or not mat.use_nodes or mat.node_tree is None:
+        return None
+    for n in mat.node_tree.nodes:
+        if n.bl_idname == 'ShaderNodeBsdfPrincipled':
+            return n
+    return None
+
+
+def shape_material_values(shape):
+    """Surface values of a shape's own material (Principled BSDF inputs, or viewport colour)."""
+    mat = shape.active_material
+    if mat is None:
+        return None
+    bsdf = _principled(mat)
+    if bsdf is None:
+        c = mat.diffuse_color
+        return {'color': (c[0], c[1], c[2], 1.0), 'metallic': mat.metallic, 'roughness': mat.roughness}
+    def val(name, default):
+        s = bsdf.inputs.get(name)
+        return s.default_value if s is not None else default
+    bc = val('Base Color', (0.8, 0.8, 0.8, 1.0))
+    ec = val('Emission Color', (1.0, 1.0, 1.0, 1.0))
+    return {
+        'color': (bc[0], bc[1], bc[2], 1.0),
+        'metallic': float(val('Metallic', 0.0)),
+        'roughness': float(val('Roughness', 0.5)),
+        'transmission': float(val('Transmission Weight', 0.0)),
+        'ior': float(val('IOR', 1.45)),
+        'emission_color': (ec[0], ec[1], ec[2], 1.0),
+        'emission_strength': float(val('Emission Strength', 0.0)),
+    }
+
+
+def sync_shape_from_material(shape):
+    """Copy the shape material's values into the shape settings; True if anything changed."""
+    vals = shape_material_values(shape)
+    if vals is None:
+        return False
+    st = shape.sdf_shape
+    changed = False
+    for key, v in vals.items():
+        cur = getattr(st, key)
+        if isinstance(v, tuple):
+            if any(abs(a - b_) > 1e-6 for a, b_ in zip(cur, v)):
+                setattr(st, key, v)
+                changed = True
+        elif abs(cur - v) > 1e-6:
+            setattr(st, key, v)
+            changed = True
+    return changed
+
+
+def sync_fusion_materials(fusion):
+    changed = False
+    for ref in fusion.sdf_fusion.shapes:
+        sh = ref.object
+        if sh is not None and sh.sdf_shape.use_material:
+            changed |= sync_shape_from_material(sh)
+    return changed
 
 
 def ensure_color_material(fusion, force=False):
@@ -210,7 +329,7 @@ def add_shape(context, fusion, primitive, location):
     st['color'] = PALETTE[len(fusion.sdf_fusion.shapes) % len(PALETTE)]
     # primitive assignment triggers the proxy refresh; silence it by filling first
     st['primitive'] = [i for i, it in enumerate(PRIMITIVE_ITEMS) if it[0] == primitive][0]
-    fill_proxy_mesh(mesh, primitive, st.tube, st.top_radius)
+    fill_proxy_mesh(mesh, primitive, st.tube, st.top_radius, st.sides)
     shape.display_type = 'WIRE'
     shape.hide_render = True
     shape.parent = fusion
@@ -243,10 +362,41 @@ def prune_fusion(fusion):
     changed = False
     for i in range(len(refs) - 1, -1, -1):
         ob = refs[i].object
+        if ob is not None and ob.sdf_shape.enabled and ob.sdf_shape.fusion != fusion and ob.parent == fusion:
+            # a shape duplicated together with its fusion (Shift+D): adopt it
+            ob.sdf_shape.fusion = fusion
+            changed = True
+            continue
         if ob is None or not ob.sdf_shape.enabled or ob.sdf_shape.fusion != fusion:
             refs.remove(i)
             changed = True
     return changed
+
+
+def duplicate_fusion(context, fusion, offset):
+    """Deep-copy a fusion with its shapes into an independent fusion."""
+    new_fusion = fusion.copy()
+    new_fusion.data = fusion.data.copy()
+    _link_like(new_fusion, fusion, context)
+    mod = new_fusion.modifiers.get(nodes.MODIFIER_NAME)
+    if mod is not None:
+        mod.node_group = None          # never share the original's tree
+    new_fusion.sdf_fusion.shapes.clear()
+    for ref in fusion.sdf_fusion.shapes:
+        sh = ref.object
+        if sh is None:
+            continue
+        nsh = sh.copy()
+        nsh.data = sh.data.copy()
+        _link_like(nsh, sh, context)
+        nsh.parent = new_fusion
+        nsh.matrix_parent_inverse = sh.matrix_parent_inverse.copy()
+        nsh.sdf_shape.fusion = new_fusion
+        new_fusion.sdf_fusion.shapes.add().object = nsh
+    new_fusion.location = fusion.location + Vector(offset)
+    nodes.rebuild(new_fusion)
+    context.scene.sdf_active_fusion = new_fusion
+    return new_fusion
 
 
 def _strip_empty_material_slots(mesh):
@@ -258,6 +408,78 @@ def _strip_empty_material_slots(mesh):
             for p in mesh.polygons:
                 if p.material_index > i:
                     p.material_index -= 1
+
+
+def show_setup(fusion):
+    """Undo what Convert's Hide Setup did."""
+    try:
+        fusion.hide_set(False)
+    except RuntimeError:
+        pass
+    fusion.hide_render = False
+    for ref in fusion.sdf_fusion.shapes:
+        if ref.object is not None:
+            try:
+                ref.object.hide_set(False)
+            except RuntimeError:
+                pass
+
+
+def setup_is_hidden(fusion):
+    try:
+        return fusion.hide_get() or fusion.hide_render
+    except RuntimeError:
+        return fusion.hide_render
+
+
+_UNIT_CACHE = {}
+
+
+def unit_proxy_vertices(primitive, tube, top_radius, sides):
+    key = (primitive, round(tube, 6), round(top_radius, 6), int(sides))
+    v = _UNIT_CACHE.get(key)
+    if v is None:
+        me = bpy.data.meshes.new('_sdff_unit')
+        fill_proxy_mesh(me, primitive, tube, top_radius, sides)
+        arr = np.empty(len(me.vertices) * 3)
+        me.vertices.foreach_get('co', arr)
+        v = arr.reshape(-1, 3).copy()
+        bpy.data.meshes.remove(me)
+        _UNIT_CACHE[key] = v
+    return v
+
+
+def repair_applied_transform(shape):
+    """Apply Scale/Rotation/Location bakes a transform into the proxy mesh,
+    which would silently change the SDF (sizes come from the object scale).
+    Recover that affine transform from the vertices, fold it back into the
+    object and restore the unit proxy, so nothing visibly changes and the
+    field stays consistent.  Returns True when a repair happened."""
+    st = shape.sdf_shape
+    me = shape.data
+    if me is None:
+        return False
+    ref = unit_proxy_vertices(st.primitive, st.tube, st.top_radius, st.sides)
+    if len(me.vertices) != len(ref):
+        return False
+    cur = np.empty(len(ref) * 3)
+    me.vertices.foreach_get('co', cur)
+    cur = cur.reshape(-1, 3)
+    if np.allclose(cur, ref, atol=1e-6):
+        return False
+    A = np.c_[ref, np.ones(len(ref))]
+    MT, _res, rank, _sv = np.linalg.lstsq(A, cur, rcond=None)
+    if rank < 4:
+        return False
+    if np.abs(A @ MT - cur).max() > 1e-4 * max(1.0, float(np.abs(cur).max())):
+        return False                        # hand-edited, not an affine change
+    M = Matrix.Identity(4)
+    for r in range(3):
+        for c in range(4):
+            M[r][c] = float(MT[c][r])
+    shape.matrix_world = shape.matrix_world @ M
+    fill_proxy_mesh(me, st.primitive, st.tube, st.top_radius, st.sides)
+    return True
 
 
 def convert_to_mesh(context, fusion, resolution, keep_setup=True, hide_setup=True):
@@ -281,6 +503,7 @@ def convert_to_mesh(context, fusion, resolution, keep_setup=True, hide_setup=Tru
                 ob.hide_set(True)
             except RuntimeError:
                 pass
+            ob.hide_render = True          # never render over the baked mesh
     for o in context.view_layer.objects:
         o.select_set(False)
     result.select_set(True)
@@ -413,10 +636,49 @@ class SDFF_OT_select_fusion(Operator):
         return {'FINISHED'}
 
 
+class SDFF_OT_show_setup(Operator):
+    bl_idname = "sdf_fusion.show_setup"
+    bl_label = "Show Fusion Setup"
+    bl_description = "Unhide the fusion and its shapes (viewport and render) to keep editing"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return find_fusion(context) is not None
+
+    def execute(self, context):
+        show_setup(find_fusion(context))
+        return {'FINISHED'}
+
+
+class SDFF_OT_duplicate_fusion(Operator):
+    bl_idname = "sdf_fusion.duplicate_fusion"
+    bl_label = "Duplicate Fusion"
+    bl_description = "Copy this fusion and all its shapes into a new, independent fusion"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return find_fusion(context) is not None
+
+    def execute(self, context):
+        fusion = find_fusion(context)
+        dg = context.evaluated_depsgraph_get()
+        ev = fusion.evaluated_get(dg)
+        xs = [v.co.x for v in ev.data.vertices]
+        width = (max(xs) - min(xs)) if xs else 2.0
+        new_fusion = duplicate_fusion(context, fusion, (width * 1.2, 0.0, 0.0))
+        for o in context.view_layer.objects:
+            o.select_set(False)
+        new_fusion.select_set(True)
+        context.view_layer.objects.active = new_fusion
+        return {'FINISHED'}
+
+
 class SDFF_OT_color_from_material(Operator):
     bl_idname = "sdf_fusion.color_from_material"
-    bl_label = "Color from Material"
-    bl_description = "Copy the colour of the shape's own material into its fusion colour"
+    bl_label = "From Material"
+    bl_description = "Copy colour, metallic, roughness, transmission, IOR and emission from the shape's own material"
     bl_options = {'REGISTER', 'UNDO'}
 
     all_shapes: BoolProperty(name="All Shapes", default=False)
@@ -432,9 +694,8 @@ class SDFF_OT_color_from_material(Operator):
         for sh in shapes:
             if sh is None:
                 continue
-            c = shape_material_color(sh)
-            if c is not None:
-                sh.sdf_shape.color = c
+            if shape_material_values(sh) is not None:
+                sync_shape_from_material(sh)
                 done += 1
         if done == 0:
             self.report({'WARNING'}, "The shape has no material to take a colour from")
@@ -493,6 +754,8 @@ classes = (
     SDFF_OT_move_shape,
     SDFF_OT_rebuild,
     SDFF_OT_select_fusion,
+    SDFF_OT_duplicate_fusion,
+    SDFF_OT_show_setup,
     SDFF_OT_color_from_material,
     SDFF_OT_setup_color_material,
     SDFF_OT_convert,

@@ -21,15 +21,18 @@ upstream GLSL library (see ``sdf_ref.py`` for the readable reference).
 
 import bpy
 
-GROUP_VERSION = 2
+GROUP_VERSION = 3
 COLOR_ATTRIBUTE = "Color"
+SURFACE_ATTRIBUTE = "SDF Surface"     # (metallic, roughness, transmission)
+EXTRA_ATTRIBUTE = "SDF Extra"         # (ior, emission strength, 0)
+EMISSION_ATTRIBUTE = "SDF Emission"   # emission colour
 MODIFIER_NAME = "SDF Fusion"
 TREE_PREFIX = "SDFF Tree"
 GRID_NAME = "density"
 EPS_BLEND = 1e-4
 SQRT05 = 0.70710678118
 
-PRIMITIVES = ('BOX', 'SPHERE', 'CYLINDER', 'TORUS', 'CONE')
+PRIMITIVES = ('BOX', 'SPHERE', 'CYLINDER', 'TORUS', 'CONE', 'CAPSULE', 'PYRAMID', 'PRISM')
 OPERATIONS = ('UNION', 'SUBTRACT', 'INTERSECT')
 BLEND_TYPES = ('NONE', 'SMOOTH', 'ROUND', 'CHAMFER', 'STEPS')
 
@@ -149,6 +152,20 @@ class _Builder:
         n = self.node('FunctionNodeInputColor', name)
         set_color_node(n, rgba)
         return n.outputs[0]
+
+    def vector_input(self, xyz, name=None):
+        n = self.node('FunctionNodeInputVector', name)
+        n.vector = tuple(xyz)
+        return n.outputs[0]
+
+    def mix_vector(self, a, b, t):
+        n = self.node('ShaderNodeMix')
+        n.data_type = 'VECTOR'
+        sock = {s.identifier: s for s in n.inputs}
+        self.link(t, sock['Factor_Float'])
+        self.link(a, sock['A_Vector'])
+        self.link(b, sock['B_Vector'])
+        return next(s for s in n.outputs if s.identifier == 'Result_Vector')
 
 
 def set_color_node(node, rgba):
@@ -272,7 +289,102 @@ def _build_cone(name):
     return ng
 
 
+def _build_cylinder_like(name, capsule):
+    """Cylinder; the capsule variant rounds by the smallest scale (its radius)."""
+    ng, b, gi, go = _new_group(name, _PRIM_INPUTS, _PRIM_OUTPUTS)
+    P, S = gi.outputs['Position'], gi.outputs['Scale']
+    px, py, pz = b.sep(P)
+    sx, sy, sz = b.sep(S)
+    R = b.min3(sx, sy, sz) if capsule else gi.outputs['Rounding']
+    rmin = b.math('MINIMUM', sx, sy)
+    radial_n = b.vmath_f('LENGTH', b.comb(b.math('DIVIDE', px, sx), b.math('DIVIDE', py, sy), 0.0))
+    radial = b.math('MULTIPLY', b.math('SUBTRACT', radial_n, 1.0), rmin)
+    axial = b.math('SUBTRACT', b.math('ABSOLUTE', pz), sz)
+    dx = b.math('ADD', radial, R)
+    dy = b.math('ADD', axial, R)
+    inside = b.math('MINIMUM', b.math('MAXIMUM', dx, dy), 0.0)
+    outside = b.vmath_f('LENGTH', b.comb(b.math('MAXIMUM', dx, 0.0), b.math('MAXIMUM', dy, 0.0), 0.0))
+    d = b.math('SUBTRACT', b.math('ADD', inside, outside), R)
+    b.link(d, go.inputs['Distance'])
+    return ng
+
+
+def _build_capsule(name):
+    return _build_cylinder_like(name, capsule=True)
+
+
+def _build_pyramid(name):
+    """Port of upstream sdPyramid (Y-up) remapped to Z-up; hw = sx, hd = sy, hh = sz."""
+    ng, b, gi, go = _new_group(name, _PRIM_INPUTS, _PRIM_OUTPUTS)
+    P, S = gi.outputs['Position'], gi.outputs['Scale']
+    px, py, pz = b.sep(P)
+    hw, hd, hh = b.sep(S)
+    x = b.math('ABSOLUTE', px)
+    y = b.math('ADD', pz, hh)
+    z = b.math('ABSOLUTE', py)
+    Pv = b.comb(x, y, z)
+    corner = b.comb(hw, 0.0, hd)
+    hh2 = b.math('MULTIPLY', hh, 2.0)
+    hi = b.comb(hw, hh2, hd)
+    rel = b.vmath('SUBTRACT', Pv, corner)
+    d1 = b.comb(b.math('MAXIMUM', b.math('SUBTRACT', x, hw), 0.0), y, b.math('MAXIMUM', b.math('SUBTRACT', z, hd), 0.0))
+    n1 = b.comb(0.0, hd, hh2)
+    k1 = b.vmath_f('DOT_PRODUCT', n1, n1)
+    h1 = b.math('DIVIDE', b.vmath_f('DOT_PRODUCT', rel, n1), k1)
+    n2 = b.comb(k1, b.math('MULTIPLY', hh2, hw), b.math('MULTIPLY', b.math('MULTIPLY', hd, hw), -1.0))
+    m1 = b.math('DIVIDE', b.vmath_f('DOT_PRODUCT', rel, n2), b.vmath_f('DOT_PRODUCT', n2, n2))
+    q2 = b.vmath('SUBTRACT', b.vmath('SUBTRACT', Pv, b.vmath('SCALE', n1, scale=h1)), b.vmath('SCALE', n2, scale=b.math('MAXIMUM', m1, 0.0)))
+    d2 = b.vmath('SUBTRACT', Pv, b.vmath('MAXIMUM', b.vmath('MINIMUM', q2, hi), (0.0, 0.0, 0.0)))
+    n3 = b.comb(hh2, hw, 0.0)
+    k2 = b.vmath_f('DOT_PRODUCT', n3, n3)
+    h2 = b.math('DIVIDE', b.vmath_f('DOT_PRODUCT', rel, n3), k2)
+    n4 = b.comb(b.math('MULTIPLY', b.math('MULTIPLY', hw, hd), -1.0), b.math('MULTIPLY', hh2, hd), k2)
+    m2 = b.math('DIVIDE', b.vmath_f('DOT_PRODUCT', rel, n4), b.vmath_f('DOT_PRODUCT', n4, n4))
+    q3 = b.vmath('SUBTRACT', b.vmath('SUBTRACT', Pv, b.vmath('SCALE', n3, scale=h2)), b.vmath('SCALE', n4, scale=b.math('MAXIMUM', m2, 0.0)))
+    d3 = b.vmath('SUBTRACT', Pv, b.vmath('MAXIMUM', b.vmath('MINIMUM', q3, hi), (0.0, 0.0, 0.0)))
+    dd = b.min3(b.vmath_f('DOT_PRODUCT', d1, d1), b.vmath_f('DOT_PRODUCT', d2, d2), b.vmath_f('DOT_PRODUCT', d3, d3))
+    d = b.math('SQRT', dd)
+    inside = b.math('LESS_THAN', b.math('MAXIMUM', b.math('MAXIMUM', h1, h2), b.neg(y)), 0.0)
+    signed = b.math('MULTIPLY', d, b.math('MULTIPLY_ADD', inside, -2.0, 1.0))
+    b.link(signed, go.inputs['Distance'])
+    return ng
+
+
+def _build_prism(name):
+    """Regular N-gon prism (Param = sides), circumradius = XY scale, half height = Z scale."""
+    ng, b, gi, go = _new_group(name, _PRIM_INPUTS, _PRIM_OUTPUTS)
+    P, S, R = gi.outputs['Position'], gi.outputs['Scale'], gi.outputs['Rounding']
+    nsides = b.math('MAXIMUM', b.math('ROUND', gi.outputs['Param']), 3.0)
+    px, py, pz = b.sep(P)
+    sx, sy, sz = b.sep(S)
+    rmin = b.math('MINIMUM', sx, sy)
+    pnx = b.math('DIVIDE', px, sx)
+    pny = b.math('DIVIDE', py, sy)
+    an = b.math('DIVIDE', 3.14159265358979, nsides)
+    ca = b.math('COSINE', an)
+    sa = b.math('SINE', an)
+    ang = b.math('ARCTAN2', pnx, pny)
+    bn = b.math('SUBTRACT', b.math('FLOORED_MODULO', ang, b.math('MULTIPLY', an, 2.0)), an)
+    L = b.vmath_f('LENGTH', b.comb(pnx, pny, 0.0))
+    qx = b.math('SUBTRACT', b.math('MULTIPLY', L, b.math('COSINE', bn)), ca)
+    qy0 = b.math('SUBTRACT', b.math('MULTIPLY', L, b.math('ABSOLUTE', b.math('SINE', bn))), sa)
+    qy = b.math('ADD', qy0, b.math('MINIMUM', b.math('MAXIMUM', b.neg(qy0), 0.0), sa))
+    sgn = b.math('MULTIPLY_ADD', b.math('LESS_THAN', qx, 0.0), -2.0, 1.0)
+    d2 = b.math('MULTIPLY', b.math('MULTIPLY', b.math('SQRT', b.math('MULTIPLY_ADD', qx, qx, b.math('MULTIPLY', qy, qy))), sgn), rmin)
+    axial = b.math('SUBTRACT', b.math('ABSOLUTE', pz), sz)
+    dx = b.math('ADD', d2, R)
+    dy = b.math('ADD', axial, R)
+    inside = b.math('MINIMUM', b.math('MAXIMUM', dx, dy), 0.0)
+    outside = b.vmath_f('LENGTH', b.comb(b.math('MAXIMUM', dx, 0.0), b.math('MAXIMUM', dy, 0.0), 0.0))
+    d = b.math('SUBTRACT', b.math('ADD', inside, outside), R)
+    b.link(d, go.inputs['Distance'])
+    return ng
+
+
 _PRIM_BUILDERS = {
+    'CAPSULE': _build_capsule,
+    'PYRAMID': _build_pyramid,
+    'PRISM': _build_prism,
     'BOX': _build_box,
     'SPHERE': _build_sphere,
     'CYLINDER': _build_cylinder,
@@ -304,8 +416,16 @@ _OP_INPUTS = [
     ('Steps', 'NodeSocketFloat', 1.0),
     ('Color', 'NodeSocketColor', (0.8, 0.8, 0.8, 1.0)),
     ('Accumulated Color', 'NodeSocketColor', (0.8, 0.8, 0.8, 1.0)),
+    ('Surface', 'NodeSocketVector', (0.0, 0.5, 0.0)),
+    ('Accumulated Surface', 'NodeSocketVector', (0.0, 0.5, 0.0)),
+    ('Extra', 'NodeSocketVector', (1.45, 0.0, 0.0)),
+    ('Accumulated Extra', 'NodeSocketVector', (1.45, 0.0, 0.0)),
+    ('Emission', 'NodeSocketColor', (0.0, 0.0, 0.0, 1.0)),
+    ('Accumulated Emission', 'NodeSocketColor', (0.0, 0.0, 0.0, 1.0)),
 ]
-_OP_OUTPUTS = [('Result', 'NodeSocketFloat'), ('Result Color', 'NodeSocketColor')]
+_OP_OUTPUTS = [('Result', 'NodeSocketFloat'), ('Result Color', 'NodeSocketColor'),
+               ('Result Surface', 'NodeSocketVector'), ('Result Extra', 'NodeSocketVector'),
+               ('Result Emission', 'NodeSocketColor')]
 
 
 def _build_op(name, operation, blend_type):
@@ -334,6 +454,9 @@ def _build_op(name, operation, blend_type):
         else:
             hc = b.clamp01(b.math('MULTIPLY_ADD', b.math('DIVIDE', b.math('SUBTRACT', d1, d0), k), -0.5, 0.5))
     b.link(b.mix_color(c1, c0, hc), go.inputs['Result Color'])
+    b.link(b.mix_vector(gi.outputs['Accumulated Surface'], gi.outputs['Surface'], hc), go.inputs['Result Surface'])
+    b.link(b.mix_vector(gi.outputs['Accumulated Extra'], gi.outputs['Extra'], hc), go.inputs['Result Extra'])
+    b.link(b.mix_color(gi.outputs['Accumulated Emission'], gi.outputs['Emission'], hc), go.inputs['Result Emission'])
 
     if blend_type == 'NONE':
         if operation == 'UNION':
@@ -426,6 +549,8 @@ def shape_param(shape_settings):
         return shape_settings.tube
     if shape_settings.primitive == 'CONE':
         return shape_settings.top_radius
+    if shape_settings.primitive == 'PRISM':
+        return float(shape_settings.sides)
     return 0.0
 
 
@@ -453,11 +578,20 @@ def get_tree(fusion_ob, create=True):
     if mod is None:
         return None
     tree = mod.node_group
+    if tree is not None and tree.users > 1 and create:
+        # shared with another fusion (e.g. after Shift+D): give this one its own
+        mod.node_group = None
+        tree = None
     if tree is None and create:
         tree = bpy.data.node_groups.new(f"{TREE_PREFIX}: {fusion_ob.name}", 'GeometryNodeTree')
         tree.is_modifier = True
         mod.node_group = tree
     return tree
+
+
+def tree_is_shared(fusion_ob):
+    mod = get_modifier(fusion_ob, create=False)
+    return mod is not None and mod.node_group is not None and mod.node_group.users > 1
 
 
 def _ensure_interface(tree):
@@ -477,9 +611,15 @@ def build_field(b, fusion_ob, shapes, position, global_blend, global_steps):
     settings = fusion_ob.sdf_fusion
     acc = None
     acc_color = None
+    acc_surface = None
+    acc_extra = None
+    acc_emission = None
     for i, sh in enumerate(shapes):
         st = sh.sdf_shape
         color = b.color_input(st.color, f'COLOR_{i}')
+        surface = b.vector_input((st.metallic, st.roughness, st.transmission), f'SURFACE_{i}')
+        extra = b.vector_input((st.ior, st.emission_strength, 0.0), f'EXTRA_{i}')
+        emission = b.color_input(st.emission_color, f'EMISSION_{i}')
         oi = b.node('GeometryNodeObjectInfo', f'OBJ_{i}')
         oi.transform_space = 'RELATIVE'
         oi.inputs['Object'].default_value = sh
@@ -505,7 +645,7 @@ def build_field(b, fusion_ob, shapes, position, global_blend, global_steps):
 
         if acc is None:
             acc = d
-            acc_color = color
+            acc_color, acc_surface, acc_extra, acc_emission = color, surface, extra, emission
             continue
         btype = st.blend_type if st.use_custom_blend else settings.blend_type
         opn = b.group(op_group(st.operation, btype), f'OP_{i}')
@@ -513,7 +653,16 @@ def build_field(b, fusion_ob, shapes, position, global_blend, global_steps):
         b.link(acc, opn.inputs['Accumulated'])
         b.link(color, opn.inputs['Color'])
         b.link(acc_color, opn.inputs['Accumulated Color'])
+        b.link(surface, opn.inputs['Surface'])
+        b.link(acc_surface, opn.inputs['Accumulated Surface'])
+        b.link(extra, opn.inputs['Extra'])
+        b.link(acc_extra, opn.inputs['Accumulated Extra'])
+        b.link(emission, opn.inputs['Emission'])
+        b.link(acc_emission, opn.inputs['Accumulated Emission'])
         acc_color = opn.outputs['Result Color']
+        acc_surface = opn.outputs['Result Surface']
+        acc_extra = opn.outputs['Result Extra']
+        acc_emission = opn.outputs['Result Emission']
         if st.use_custom_blend:
             opn.inputs['Blend'].default_value = st.blend
             opn.inputs['Steps'].default_value = float(st.steps)
@@ -521,7 +670,7 @@ def build_field(b, fusion_ob, shapes, position, global_blend, global_steps):
             b.link(global_blend, opn.inputs['Blend'])
             b.link(global_steps, opn.inputs['Steps'])
         acc = opn.outputs['Result']
-    return acc, acc_color
+    return acc, (acc_color, acc_surface, acc_extra, acc_emission)
 
 
 def max_custom_blend(fusion_ob):
@@ -536,6 +685,8 @@ def rebuild(fusion_ob):
     """(Re)generate the whole modifier tree from the fusion's shape list."""
     settings = fusion_ob.sdf_fusion
     tree = get_tree(fusion_ob)
+    if tree.animation_data is not None:
+        tree.animation_data_clear()        # drivers of the nodes we are about to delete
     tree.nodes.clear()
     _ensure_interface(tree)
     b = _Builder(tree)
@@ -554,7 +705,7 @@ def rebuild(fusion_ob):
     pad_blend = b.value(max_custom_blend(fusion_ob), 'PAD_BLEND')
     position = b.node('GeometryNodeInputPosition').outputs[0]
 
-    acc, acc_color = build_field(b, fusion_ob, shapes, position, blend, steps)
+    acc, (acc_color, acc_surface, acc_extra, acc_emission) = build_field(b, fusion_ob, shapes, position, blend, steps)
 
     # bounds: union of the proxy meshes (already in fusion-local space)
     join = b.node('GeometryNodeJoinGeometry', 'BOUNDS_JOIN')
@@ -614,6 +765,16 @@ def rebuild(fusion_ob):
         store.inputs['Name'].default_value = COLOR_ATTRIBUTE
         b.link(mesh_out, store.inputs['Geometry'])
         b.link(acc_color, store.inputs['Value'])
+        for nm, dtype, value in ((SURFACE_ATTRIBUTE, 'FLOAT_VECTOR', acc_surface),
+                                 (EXTRA_ATTRIBUTE, 'FLOAT_VECTOR', acc_extra),
+                                 (EMISSION_ATTRIBUTE, 'FLOAT_COLOR', acc_emission)):
+            st_ = b.node('GeometryNodeStoreNamedAttribute')
+            st_.data_type = dtype
+            st_.domain = 'POINT'
+            st_.inputs['Name'].default_value = nm
+            b.link(store.outputs[0], st_.inputs['Geometry'])
+            b.link(value, st_.inputs['Value'])
+            store = st_
         # Solid-mode "Attribute" colouring only reads the mesh's *active*
         # colour layer, which a layer created in nodes never is.  Joining the
         # (empty) original mesh first makes the result inherit its active
@@ -640,9 +801,90 @@ def rebuild(fusion_ob):
     setmat.inputs['Material'].default_value = fusion_ob.active_material
     b.link(setmat.outputs[0], go.inputs[0])
 
+    add_drivers(tree, fusion_ob, shapes)
     mod = get_modifier(fusion_ob)
     mod.show_viewport = settings.live
     return tree
+
+
+# ----------------------------------------------------------------------------
+# drivers: keep node values in sync with (possibly animated) properties
+# ----------------------------------------------------------------------------
+
+def _drive(target, prop, id_obj, data_path, index=-1):
+    """Drive ``target.prop`` (array element ``index``) by ``id_obj.data_path`` with no Python."""
+    fc = target.driver_add(prop, index) if index >= 0 else target.driver_add(prop)
+    drv = fc.driver
+    drv.type = 'SUM'
+    for v in list(drv.variables):
+        drv.variables.remove(v)
+    var = drv.variables.new()
+    var.name = 'v'
+    var.type = 'SINGLE_PROP'
+    t = var.targets[0]
+    t.id_type = 'OBJECT'
+    t.id = id_obj
+    t.data_path = data_path
+    return fc
+
+
+def _param_path(shape_settings):
+    return {'TORUS': 'sdf_shape.tube', 'CONE': 'sdf_shape.top_radius', 'PRISM': 'sdf_shape.sides'}.get(
+        shape_settings.primitive)
+
+
+def add_drivers(tree, fusion_ob, shapes):
+    """Wire every scalar/colour node value to its property so animation and
+    drivers on the properties reach the evaluated tree."""
+    nodes = tree.nodes
+    nodes['GLOBAL_BLEND'].outputs[0].driver_add  # noqa: B018 (ensure socket exists)
+    _drive(nodes['GLOBAL_BLEND'].outputs[0], 'default_value', fusion_ob, 'sdf_fusion.blend')
+    _drive(nodes['GLOBAL_STEPS'].outputs[0], 'default_value', fusion_ob, 'sdf_fusion.steps')
+    _drive(nodes['ADAPTIVITY'].outputs[0], 'default_value', fusion_ob, 'sdf_fusion.adaptivity')
+    custom = []
+    for i, sh in enumerate(shapes):
+        st = sh.sdf_shape
+        prim = nodes[f'PRIM_{i}']
+        _drive(prim.inputs['Rounding'], 'default_value', sh, 'sdf_shape.rounding')
+        ppath = _param_path(st)
+        if ppath:
+            _drive(prim.inputs['Param'], 'default_value', sh, ppath)
+        cnode = nodes.get(f'COLOR_{i}')
+        if cnode is not None:
+            prop = 'value' if hasattr(cnode, 'value') else 'color'
+            for c in range(4):
+                _drive(cnode, prop, sh, f'sdf_shape.color[{c}]', c)
+        snode = nodes.get(f'SURFACE_{i}')
+        if snode is not None:
+            for c, path in enumerate(('sdf_shape.metallic', 'sdf_shape.roughness', 'sdf_shape.transmission')):
+                _drive(snode, 'vector', sh, path, c)
+        xnode = nodes.get(f'EXTRA_{i}')
+        if xnode is not None:
+            _drive(xnode, 'vector', sh, 'sdf_shape.ior', 0)
+            _drive(xnode, 'vector', sh, 'sdf_shape.emission_strength', 1)
+        enode = nodes.get(f'EMISSION_{i}')
+        if enode is not None:
+            prop = 'value' if hasattr(enode, 'value') else 'color'
+            for c in range(4):
+                _drive(enode, prop, sh, f'sdf_shape.emission_color[{c}]', c)
+        opn = nodes.get(f'OP_{i}')
+        if opn is not None and st.use_custom_blend:
+            _drive(opn.inputs['Blend'], 'default_value', sh, 'sdf_shape.blend')
+            _drive(opn.inputs['Steps'], 'default_value', sh, 'sdf_shape.steps')
+            custom.append(sh)
+    if custom:
+        fc = nodes['PAD_BLEND'].outputs[0].driver_add('default_value')
+        drv = fc.driver
+        drv.type = 'MAX'
+        for v in list(drv.variables):
+            drv.variables.remove(v)
+        for k, sh in enumerate(custom):
+            var = drv.variables.new()
+            var.name = f'b{k}'
+            var.type = 'SINGLE_PROP'
+            var.targets[0].id_type = 'OBJECT'
+            var.targets[0].id = sh
+            var.targets[0].data_path = 'sdf_shape.blend'
 
 
 def _shape_index(fusion_ob, shape_ob):
@@ -689,6 +931,15 @@ def update_shape_values(fusion_ob, shape_ob):
     cnode = tree.nodes.get(f'COLOR_{i}')
     if cnode is not None:
         set_color_node(cnode, st.color)
+    snode = tree.nodes.get(f'SURFACE_{i}')
+    if snode is not None:
+        snode.vector = (st.metallic, st.roughness, st.transmission)
+    xnode = tree.nodes.get(f'EXTRA_{i}')
+    if xnode is not None:
+        xnode.vector = (st.ior, st.emission_strength, 0.0)
+    enode = tree.nodes.get(f'EMISSION_{i}')
+    if enode is not None:
+        set_color_node(enode, st.emission_color)
     opn = tree.nodes.get(f'OP_{i}')
     if opn is not None and st.use_custom_blend:
         opn.inputs['Blend'].default_value = st.blend
@@ -780,7 +1031,7 @@ def build_field_sampler(fusion_ob, sampler_ob, attribute_name='sdf'):
     blend = b.value(settings.blend, 'GLOBAL_BLEND')
     steps = b.value(float(settings.steps), 'GLOBAL_STEPS')
     position = b.node('GeometryNodeInputPosition').outputs[0]
-    acc, _acc_color = build_field(b, fusion_ob, shapes, position, blend, steps)
+    acc, _extras = build_field(b, fusion_ob, shapes, position, blend, steps)
     store = b.node('GeometryNodeStoreNamedAttribute')
     store.data_type = 'FLOAT'
     store.domain = 'POINT'
