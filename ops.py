@@ -12,6 +12,18 @@ from mathutils import Matrix, Vector
 from . import nodes
 from .props import PRIMITIVE_ITEMS
 
+COLOR_MATERIAL_NAME = "SDF Fusion Colors"
+
+# default colours handed to new shapes (cycled), pleasant and distinct
+PALETTE = (
+    (0.95, 0.55, 0.20, 1.0),
+    (0.25, 0.60, 0.95, 1.0),
+    (0.35, 0.80, 0.45, 1.0),
+    (0.90, 0.35, 0.45, 1.0),
+    (0.80, 0.75, 0.30, 1.0),
+    (0.60, 0.45, 0.90, 1.0),
+)
+
 PROXY_NAMES = {
     'BOX': "SDF Box",
     'SPHERE': "SDF Sphere",
@@ -105,6 +117,75 @@ def _link_like(ob, template, context):
             col.objects.link(ob)
 
 
+def material_reads_color_attribute(mat):
+    if mat is None or not mat.use_nodes or mat.node_tree is None:
+        return False
+    return any(n.bl_idname == 'ShaderNodeVertexColor' for n in mat.node_tree.nodes)
+
+
+def make_color_material(name=COLOR_MATERIAL_NAME):
+    """A material whose base colour comes from the fusion's 'Color' attribute."""
+    mat = bpy.data.materials.get(name)
+    if mat is not None and material_reads_color_attribute(mat):
+        return mat
+    mat = mat or bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    nt.nodes.clear()
+    out = nt.nodes.new('ShaderNodeOutputMaterial')
+    out.location = (400, 0)
+    bsdf = nt.nodes.new('ShaderNodeBsdfPrincipled')
+    bsdf.location = (0, 0)
+    attr = nt.nodes.new('ShaderNodeVertexColor')
+    attr.layer_name = nodes.COLOR_ATTRIBUTE
+    attr.location = (-300, 0)
+    nt.links.new(attr.outputs['Color'], bsdf.inputs['Base Color'])
+    nt.links.new(bsdf.outputs['BSDF'], out.inputs['Surface'])
+    mat.diffuse_color = (0.8, 0.8, 0.8, 1.0)
+    return mat
+
+
+def ensure_color_material(fusion, force=False):
+    """Make sure the fusion's material shows the blended colours."""
+    if not force and material_reads_color_attribute(fusion.active_material):
+        return fusion.active_material
+    mat = make_color_material()
+    if len(fusion.data.materials) == 0:
+        fusion.data.materials.append(mat)
+    elif force or fusion.active_material is None:
+        fusion.data.materials[0] = mat
+    else:
+        return fusion.active_material   # user material kept; panel offers a button
+    nodes.sync_material(fusion)
+    return mat
+
+
+def show_attribute_colors(context):
+    """Solid-mode viewports colour by attribute so the blend is visible at once."""
+    screen = getattr(context, 'screen', None)
+    if screen is None:
+        return
+    for area in screen.areas:
+        if area.type == 'VIEW_3D':
+            shading = area.spaces.active.shading
+            if shading.type == 'SOLID':
+                shading.color_type = 'VERTEX'
+
+
+def shape_material_color(shape):
+    """Best guess of a shape's material colour (Principled base colour or viewport colour)."""
+    mat = shape.active_material
+    if mat is None:
+        return None
+    if mat.use_nodes and mat.node_tree is not None:
+        for n in mat.node_tree.nodes:
+            if n.bl_idname == 'ShaderNodeBsdfPrincipled':
+                c = n.inputs['Base Color'].default_value
+                return (c[0], c[1], c[2], 1.0)
+    c = mat.diffuse_color
+    return (c[0], c[1], c[2], 1.0)
+
+
 def create_fusion(context, location=None):
     scene = context.scene
     mesh = bpy.data.meshes.new("SDF Fusion")
@@ -126,6 +207,7 @@ def add_shape(context, fusion, primitive, location):
     st = shape.sdf_shape
     st.enabled = True
     st.fusion = fusion
+    st['color'] = PALETTE[len(fusion.sdf_fusion.shapes) % len(PALETTE)]
     # primitive assignment triggers the proxy refresh; silence it by filling first
     st['primitive'] = [i for i, it in enumerate(PRIMITIVE_ITEMS) if it[0] == primitive][0]
     fill_proxy_mesh(mesh, primitive, st.tube, st.top_radius)
@@ -331,6 +413,53 @@ class SDFF_OT_select_fusion(Operator):
         return {'FINISHED'}
 
 
+class SDFF_OT_color_from_material(Operator):
+    bl_idname = "sdf_fusion.color_from_material"
+    bl_label = "Color from Material"
+    bl_description = "Copy the colour of the shape's own material into its fusion colour"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    all_shapes: BoolProperty(name="All Shapes", default=False)
+
+    @classmethod
+    def poll(cls, context):
+        return find_fusion(context) is not None
+
+    def execute(self, context):
+        fusion = find_fusion(context)
+        shapes = list(nodes.iter_shapes(fusion)) if self.all_shapes else [active_shape(context)]
+        done = 0
+        for sh in shapes:
+            if sh is None:
+                continue
+            c = shape_material_color(sh)
+            if c is not None:
+                sh.sdf_shape.color = c
+                done += 1
+        if done == 0:
+            self.report({'WARNING'}, "The shape has no material to take a colour from")
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+
+class SDFF_OT_setup_color_material(Operator):
+    bl_idname = "sdf_fusion.setup_color_material"
+    bl_label = "Use Color Material"
+    bl_description = "Assign a material that shows the blended shape colours (replaces the fusion's material slot)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return find_fusion(context) is not None
+
+    def execute(self, context):
+        fusion = find_fusion(context)
+        fusion.sdf_fusion.blend_colors = True
+        ensure_color_material(fusion, force=True)
+        show_attribute_colors(context)
+        return {'FINISHED'}
+
+
 class SDFF_OT_convert(Operator):
     bl_idname = "sdf_fusion.convert"
     bl_label = "Convert to Mesh"
@@ -364,6 +493,8 @@ classes = (
     SDFF_OT_move_shape,
     SDFF_OT_rebuild,
     SDFF_OT_select_fusion,
+    SDFF_OT_color_from_material,
+    SDFF_OT_setup_color_material,
     SDFF_OT_convert,
 )
 

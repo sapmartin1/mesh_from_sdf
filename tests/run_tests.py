@@ -401,6 +401,105 @@ def test_primitive_volumes():
         check(s['islands'] == 1 and rel < 0.06, f"{prim}: volume {s['volume']:.3f} vs analytic {vol:.3f} (rel err {rel:.1%}), {s['islands']} island")
 
 
+def test_color_blending():
+    print("\n[5] colour blending across the seam")
+    reset_scene()
+    fusion = ops.create_fusion(C, Vector((0, 0, 0)))
+    box = ops.add_shape(C, fusion, 'BOX', Vector((0, 0, 0)))
+    sph = ops.add_shape(C, fusion, 'SPHERE', Vector((1.3, 0.0, 0.7)))
+    sph.scale = (0.8, 0.8, 0.8)
+    RED, BLUE, GREEN = (1.0, 0.1, 0.1, 1.0), (0.1, 0.2, 1.0, 1.0), (0.1, 1.0, 0.1, 1.0)
+    box.sdf_shape.color = RED
+    sph.sdf_shape.color = BLUE
+    fs = fusion.sdf_fusion
+    fs.blend = 0.6
+    fs.blend_type = 'SMOOTH'
+    fs.quality = 'HIGH'
+    fs.blend_colors = True
+
+    def colours():
+        me = evaluated_mesh(fusion)
+        attr = me.color_attributes.get(nodes.COLOR_ATTRIBUTE)
+        if attr is None:
+            return None, None, me
+        cols = np.array([c.color[:] for c in attr.data])
+        co = np.array([v.co[:] for v in me.vertices])
+        return cols, co, me
+
+    cols, co, me = colours()
+    check(cols is not None, "generated mesh carries the 'Color' attribute")
+    far_box = cols[co[:, 0] < -0.6][:, :3]
+    far_sph = cols[co[:, 0] > 1.75][:, :3]
+    check(len(far_box) > 0 and np.allclose(far_box, RED[:3], atol=0.02), "box side has the box colour")
+    check(len(far_sph) > 0 and np.allclose(far_sph, BLUE[:3], atol=0.02), "sphere side has the sphere colour")
+    mid = np.sum((cols[:, 0] > 0.3) & (cols[:, 0] < 0.8))
+    check(mid > 30, f"colours cross-fade at the seam ({mid} in-between vertices)")
+    check(ops.material_reads_color_attribute(fusion.active_material), "fusion got a material that reads the Color attribute")
+    used = {me.materials[p.material_index].name for p in me.polygons}
+    check(used == {ops.COLOR_MATERIAL_NAME}, "generated mesh uses the colour material")
+
+    fs.blend_type = 'NONE'
+    cols2, co2, _ = colours()
+    mid2 = np.sum((cols2[:, 0] > 0.3) & (cols2[:, 0] < 0.8))
+    check(mid2 == 0, "hard union switches colour sharply (no in-between vertices)")
+    fs.blend_type = 'SMOOTH'
+
+    box.sdf_shape.color = GREEN
+    cols3, co3, _ = colours()
+    far_box3 = cols3[co3[:, 0] < -0.6][:, :3]
+    check(np.allclose(far_box3, GREEN[:3], atol=0.02), "changing a shape colour updates the mesh in place")
+    box.sdf_shape.color = RED
+
+    # subtract: the carved surface shows the cutter's colour
+    sph.sdf_shape.operation = 'SUBTRACT'
+    cols4, co4, _ = colours()
+    shapes4 = reference_shapes(fusion)
+    hom = np.c_[co4, np.ones(len(co4))]
+    d_box = sdf_ref.primitive_distance('BOX', (hom @ shapes4[0]['matrix_inv_rigid'].T)[:, :3], shapes4[0]['scale'])
+    d_sph = sdf_ref.primitive_distance('SPHERE', (hom @ shapes4[1]['matrix_inv_rigid'].T)[:, :3], shapes4[1]['scale'])
+    carved = cols4[(np.abs(d_sph) < 0.03) & (d_box < -0.3)][:, :3]     # on the cutter, inside the box
+    # the cut cross-fades towards the box colour near its rim (blend 0.6), so judge the mean
+    check(len(carved) > 20 and carved[:, 2].mean() > 0.6 and carved[:, 0].mean() < 0.5,
+          f"smooth subtract paints the cut with the cutter colour ({len(carved)} cut vertices, mean rgb {carved.mean(axis=0).round(2)})")
+    sph.sdf_shape.operation = 'UNION'
+
+    # Solid-mode viewport display (Workbench, colour by attribute, flat light)
+    scene = C.scene
+    cam_data = bpy.data.cameras.new('cam')
+    cam = bpy.data.objects.new('cam', cam_data)
+    scene.collection.objects.link(cam)
+    cam.location = (0.65, -9.0, 0.35)
+    cam.rotation_euler = Euler((math.radians(90), 0, 0))
+    scene.camera = cam
+    scene.render.engine = 'BLENDER_WORKBENCH'
+    scene.display.shading.light = 'FLAT'
+    scene.display.shading.color_type = 'VERTEX'
+    scene.view_settings.view_transform = 'Standard'
+    scene.render.resolution_x, scene.render.resolution_y = 160, 120
+    scene.render.resolution_percentage = 100
+    out = os.path.join(bpy.app.tempdir, 'sdff_color_test.png')
+    scene.render.filepath = out
+    bpy.ops.render.render(write_still=True)
+    img = bpy.data.images.load(out)
+    px = np.array(img.pixels[:]).reshape(-1, 4)
+    reddish = np.sum((px[:, 0] > 0.6) & (px[:, 2] < 0.45))
+    bluish = np.sum((px[:, 2] > 0.6) & (px[:, 0] < 0.45))
+    check(reddish > 100 and bluish > 100, f"Solid view (Attribute colour) shows both colours ({reddish} red, {bluish} blue pixels)")
+    bpy.data.objects.remove(cam, do_unlink=True)
+
+    bpy.ops.sdf_fusion.convert()
+    result = C.active_object
+    check(nodes.COLOR_ATTRIBUTE in result.data.color_attributes, "converted mesh keeps the Color attribute")
+    check(result.data.materials[0] is not None and ops.material_reads_color_attribute(result.data.materials[0]),
+          "converted mesh keeps the colour material")
+
+    # switching colours off removes the attribute again
+    fusion.hide_set(False)
+    fs.blend_colors = False
+    me5 = evaluated_mesh(fusion)
+    check(nodes.COLOR_ATTRIBUTE not in me5.color_attributes, "Blend Colors off removes the attribute")
+
+
 def test_timing():
     print("\n[4] timings (box + sphere smooth union)")
     reset_scene()
@@ -420,7 +519,7 @@ def test_timing():
 
 def main():
     t0 = time.perf_counter()
-    for test in (test_field_matches_reference, test_acceptance_flow, test_primitive_volumes, test_timing):
+    for test in (test_field_matches_reference, test_acceptance_flow, test_primitive_volumes, test_color_blending, test_timing):
         try:
             test()
         except Exception:

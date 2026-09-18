@@ -111,6 +111,11 @@ Deviations from upstream, on purpose:
   for the whole model, like Spline's Shape Blend); a per-shape
   *Custom Blend* override keeps upstream's per-object flexibility.
 * Deleting a shape object with X is enough; a depsgraph handler prunes it.
+* New in 1.1: per-shape colours blended along with the distances (Chisel
+  style).  Every op group also mixes an RGBA colour with the smooth-blend
+  factor `h` (hard booleans use a step, round/chamfer/steps borrow the smooth
+  factor); the colour field is evaluated at the mesh vertices with Store
+  Named Attribute ("Color") and a generated material reads it.
 
 ## 4. Verified
 

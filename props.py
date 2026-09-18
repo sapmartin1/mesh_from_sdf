@@ -2,7 +2,7 @@
 """Property groups: per-shape settings, per-fusion settings, scene state."""
 
 import bpy
-from bpy.props import (BoolProperty, CollectionProperty, EnumProperty, FloatProperty,
+from bpy.props import (BoolProperty, CollectionProperty, EnumProperty, FloatProperty, FloatVectorProperty,
                        IntProperty, PointerProperty)
 from bpy.types import PropertyGroup
 
@@ -86,6 +86,16 @@ def _fusion_values(self, context):
         nodes.update_values(self.id_data)
 
 
+def _fusion_colors(self, context):
+    if not self.enabled:
+        return
+    from . import ops
+    nodes.rebuild(self.id_data)
+    if self.blend_colors:
+        ops.ensure_color_material(self.id_data)
+        ops.show_attribute_colors(context)
+
+
 def _fusion_live(self, context):
     mod = nodes.get_modifier(self.id_data, create=False)
     if mod is not None:
@@ -140,6 +150,11 @@ class SDFShapeSettings(PropertyGroup):
         name="Blend Type", items=BLEND_ITEMS, default='SMOOTH', update=_shape_rebuild)
     steps: IntProperty(
         name="Steps", default=3, min=1, max=32, update=_shape_values)
+    color: FloatVectorProperty(
+        name="Color", subtype='COLOR', size=4, min=0.0, max=1.0,
+        default=(0.8, 0.8, 0.8, 1.0),
+        description="Colour of this shape when the fusion blends colours",
+        update=_shape_values)
 
 
 class SDFShapeRef(PropertyGroup):
@@ -171,6 +186,11 @@ class SDFFusionSettings(PropertyGroup):
     adaptivity: FloatProperty(
         name="Adaptivity", default=0.0, min=0.0, max=1.0,
         description="Merge flat areas into larger polygons (0 = uniform mesh)", update=_fusion_values)
+    blend_colors: BoolProperty(
+        name="Blend Colors", default=False,
+        description="Give every shape its own colour and cross-fade them over the blend "
+                    "(stored as the 'Color' attribute; the fusion material reads it)",
+        update=_fusion_colors)
     live: BoolProperty(
         name="Live Update", default=True,
         description="Recompute the fused mesh while editing (disable on slow scenes)",

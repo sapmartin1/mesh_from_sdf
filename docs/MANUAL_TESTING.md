@@ -28,6 +28,17 @@ on your M5 Mac with Blender 5.2 and note anything that misbehaves.
       selected, has no modifiers, enters Edit Mode normally, and the fusion
       setup is hidden (unhide with Alt+H to keep editing).
 
+## Colours
+
+- [ ] Select the box, pick a red **Color**; select the sphere, pick blue.
+- [ ] Turn on **Blend Colors** in the fusion box.  The viewport switches to
+      attribute colours; red and blue cross-fade where the shapes melt.
+- [ ] Press Z > Material Preview: the blend also shows through the
+      "SDF Fusion Colors" material.  Drag Blend: the colour transition widens.
+- [ ] Set the sphere to *Subtract*: the carved surface is blue.
+- [ ] Convert to Mesh, then check the mesh still shows the colours in
+      Material Preview and in a Cycles render.
+
 ## UI / workflow
 
 - [ ] Clicking a row in the *Shapes* sub-panel selects that shape.

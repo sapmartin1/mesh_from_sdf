@@ -3,7 +3,7 @@
 GUI smoke test: drives the *installed* SDF Fusion extension inside a real
 Blender window and saves screenshots of every step.
 
-    # install first:  blender -b --command extension install-file --repo user_default --enable dist/sdf_fusion-1.0.0.zip
+    # install first:  blender -b --command extension install-file --repo user_default --enable dist/sdf_fusion-1.1.0.zip
     blender -b --python-expr "import bpy; bpy.ops.wm.save_as_mainfile(filepath='/tmp/sdff.blend')"
     blender /tmp/sdff.blend --python tests/gui_smoke.py -- /tmp/sdff_shots
 
@@ -112,19 +112,31 @@ def steps():
             fusion = bpy.context.active_object.sdf_shape.fusion
             fusion.sdf_fusion.blend_type = 'SMOOTH'
             fusion.sdf_fusion.blend = 0.5
-            bpy.context.active_object.sdf_shape.operation = 'SUBTRACT'
+            shapes = [r.object for r in fusion.sdf_fusion.shapes]
+            shapes[0].sdf_shape.color = (0.95, 0.30, 0.20, 1.0)
+            shapes[1].sdf_shape.color = (0.20, 0.45, 0.95, 1.0)
+            win, area, region = view3d()
+            with bpy.context.temp_override(window=win, area=area, region=region, screen=win.screen):
+                fusion.sdf_fusion.blend_colors = True
+            say('blend colors on; viewport color type:', area.spaces.active.shading.color_type,
+                'material:', fusion.active_material.name if fusion.active_material else None)
             return 0.8
         if i == 5:
-            screenshot('gui_04_smooth_subtract.png')
+            screenshot('gui_04_blend_colors.png')
+            bpy.context.active_object.sdf_shape.operation = 'SUBTRACT'
+            return 0.8
+        if i == 6:
+            screenshot('gui_05_smooth_subtract_colors.png')
             bpy.context.active_object.sdf_shape.operation = 'UNION'
             win, area, region = view3d()
             with bpy.context.temp_override(window=win, area=area, region=region):
                 bpy.ops.sdf_fusion.convert()
             ob = bpy.context.active_object
-            say('after convert active:', ob.name, 'modifiers:', len(ob.modifiers), 'faces:', len(ob.data.polygons))
+            say('after convert active:', ob.name, 'modifiers:', len(ob.modifiers), 'faces:', len(ob.data.polygons),
+                'color attr:', 'Color' in ob.data.color_attributes)
             return 0.8
-        if i == 6:
-            screenshot('gui_05_converted_mesh.png')
+        if i == 7:
+            screenshot('gui_06_converted_mesh.png')
             say('DONE')
             bpy.ops.wm.quit_blender()
             return None

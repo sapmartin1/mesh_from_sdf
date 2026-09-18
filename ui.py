@@ -59,6 +59,9 @@ class SDFF_PT_main(Panel):
             box.prop(st, 'primitive', text="")
             row = box.row(align=True)
             row.prop(st, 'operation', expand=True)
+            row = box.row(align=True)
+            row.prop(st, 'color', text="Color")
+            row.operator('sdf_fusion.color_from_material', text="", icon='MATERIAL')
             if st.primitive in {'BOX', 'CYLINDER'}:
                 box.prop(st, 'rounding', slider=True)
             elif st.primitive == 'TORUS':
@@ -90,7 +93,11 @@ class SDFF_PT_main(Panel):
             col.prop(fs, 'resolution')
         col.prop(fs, 'adaptivity', slider=True)
         col.prop(fs, 'live', toggle=True, icon='PLAY' if fs.live else 'PAUSE')
-        box.template_ID(fusion, 'active_material', new='material.new')
+        col = box.column(align=True)
+        col.prop(fs, 'blend_colors', toggle=True, icon='COLOR')
+        col.template_ID(fusion, 'active_material', new='material.new')
+        if fs.blend_colors and not ops.material_reads_color_attribute(fusion.active_material):
+            col.operator('sdf_fusion.setup_color_material', icon='NODE_MATERIAL')
 
         box = layout.box()
         box.prop(fs, 'final_resolution')

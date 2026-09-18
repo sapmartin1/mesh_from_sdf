@@ -21,7 +21,8 @@ upstream GLSL library (see ``sdf_ref.py`` for the readable reference).
 
 import bpy
 
-GROUP_VERSION = 1
+GROUP_VERSION = 2
+COLOR_ATTRIBUTE = "Color"
 MODIFIER_NAME = "SDF Fusion"
 TREE_PREFIX = "SDFF Tree"
 GRID_NAME = "density"
@@ -133,6 +134,29 @@ class _Builder:
 
     def neg(self, x):
         return self.math('MULTIPLY', x, -1.0)
+
+    def mix_color(self, a, b, t):
+        """Mix RGBA: result = a * (1 - t) + b * t."""
+        n = self.node('ShaderNodeMix')
+        n.data_type = 'RGBA'
+        sock = {s.identifier: s for s in n.inputs}
+        self.link(t, sock['Factor_Float'])
+        self.link(a, sock['A_Color'])
+        self.link(b, sock['B_Color'])
+        return next(s for s in n.outputs if s.identifier == 'Result_Color')
+
+    def color_input(self, rgba, name=None):
+        n = self.node('FunctionNodeInputColor', name)
+        set_color_node(n, rgba)
+        return n.outputs[0]
+
+
+def set_color_node(node, rgba):
+    rgba = tuple(rgba) if len(rgba) == 4 else tuple(rgba) + (1.0,)
+    try:
+        node.value = rgba
+    except AttributeError:
+        node.color = rgba
 
 
 def _new_group(name, inputs, outputs):
@@ -278,15 +302,38 @@ _OP_INPUTS = [
     ('Accumulated', 'NodeSocketFloat', 0.0),
     ('Blend', 'NodeSocketFloat', 0.0),
     ('Steps', 'NodeSocketFloat', 1.0),
+    ('Color', 'NodeSocketColor', (0.8, 0.8, 0.8, 1.0)),
+    ('Accumulated Color', 'NodeSocketColor', (0.8, 0.8, 0.8, 1.0)),
 ]
-_OP_OUTPUTS = [('Result', 'NodeSocketFloat')]
+_OP_OUTPUTS = [('Result', 'NodeSocketFloat'), ('Result Color', 'NodeSocketColor')]
 
 
 def _build_op(name, operation, blend_type):
     ng, b, gi, go = _new_group(name, _OP_INPUTS, _OP_OUTPUTS)
     d0, d1 = gi.outputs['Distance'], gi.outputs['Accumulated']
+    c0, c1 = gi.outputs['Color'], gi.outputs['Accumulated Color']
     k = b.math('MAXIMUM', gi.outputs['Blend'], EPS_BLEND)
     n = b.math('MAXIMUM', gi.outputs['Steps'], 1.0)
+
+    # Colour weight of the NEW shape.  For smooth blends it is the same
+    # interpolation factor as the distance; the other blend families borrow it
+    # so colours cross-fade over the blend width; hard booleans switch at the
+    # surface that wins.
+    if blend_type == 'NONE':
+        if operation == 'UNION':
+            hc = b.math('LESS_THAN', d0, d1)
+        elif operation == 'SUBTRACT':
+            hc = b.math('GREATER_THAN', b.neg(d0), d1)
+        else:
+            hc = b.math('GREATER_THAN', d0, d1)
+    else:
+        if operation == 'UNION':
+            hc = b.clamp01(b.math('MULTIPLY_ADD', b.math('DIVIDE', b.math('SUBTRACT', d1, d0), k), 0.5, 0.5))
+        elif operation == 'SUBTRACT':
+            hc = b.clamp01(b.math('MULTIPLY_ADD', b.math('DIVIDE', b.math('ADD', d1, d0), k), -0.5, 0.5))
+        else:
+            hc = b.clamp01(b.math('MULTIPLY_ADD', b.math('DIVIDE', b.math('SUBTRACT', d1, d0), k), -0.5, 0.5))
+    b.link(b.mix_color(c1, c0, hc), go.inputs['Result Color'])
 
     if blend_type == 'NONE':
         if operation == 'UNION':
@@ -429,8 +476,10 @@ def build_field(b, fusion_ob, shapes, position, global_blend, global_steps):
     """
     settings = fusion_ob.sdf_fusion
     acc = None
+    acc_color = None
     for i, sh in enumerate(shapes):
         st = sh.sdf_shape
+        color = b.color_input(st.color, f'COLOR_{i}')
         oi = b.node('GeometryNodeObjectInfo', f'OBJ_{i}')
         oi.transform_space = 'RELATIVE'
         oi.inputs['Object'].default_value = sh
@@ -456,11 +505,15 @@ def build_field(b, fusion_ob, shapes, position, global_blend, global_steps):
 
         if acc is None:
             acc = d
+            acc_color = color
             continue
         btype = st.blend_type if st.use_custom_blend else settings.blend_type
         opn = b.group(op_group(st.operation, btype), f'OP_{i}')
         b.link(d, opn.inputs['Distance'])
         b.link(acc, opn.inputs['Accumulated'])
+        b.link(color, opn.inputs['Color'])
+        b.link(acc_color, opn.inputs['Accumulated Color'])
+        acc_color = opn.outputs['Result Color']
         if st.use_custom_blend:
             opn.inputs['Blend'].default_value = st.blend
             opn.inputs['Steps'].default_value = float(st.steps)
@@ -468,7 +521,7 @@ def build_field(b, fusion_ob, shapes, position, global_blend, global_steps):
             b.link(global_blend, opn.inputs['Blend'])
             b.link(global_steps, opn.inputs['Steps'])
         acc = opn.outputs['Result']
-    return acc
+    return acc, acc_color
 
 
 def max_custom_blend(fusion_ob):
@@ -501,7 +554,7 @@ def rebuild(fusion_ob):
     pad_blend = b.value(max_custom_blend(fusion_ob), 'PAD_BLEND')
     position = b.node('GeometryNodeInputPosition').outputs[0]
 
-    acc = build_field(b, fusion_ob, shapes, position, blend, steps)
+    acc, acc_color = build_field(b, fusion_ob, shapes, position, blend, steps)
 
     # bounds: union of the proxy meshes (already in fusion-local space)
     join = b.node('GeometryNodeJoinGeometry', 'BOUNDS_JOIN')
@@ -550,10 +603,40 @@ def rebuild(fusion_ob):
     smooth = b.node('GeometryNodeSetShadeSmooth')
     b.link(g2m.outputs['Mesh'], smooth.inputs[0])
     smooth.inputs['Shade Smooth'].default_value = True
+    mesh_out = smooth.outputs[0]
+
+    if settings.blend_colors:
+        # Evaluate the blended colour field at the mesh vertices and store it
+        # as a colour attribute the material can read.
+        store = b.node('GeometryNodeStoreNamedAttribute', 'STORE_COLOR')
+        store.data_type = 'FLOAT_COLOR'
+        store.domain = 'POINT'
+        store.inputs['Name'].default_value = COLOR_ATTRIBUTE
+        b.link(mesh_out, store.inputs['Geometry'])
+        b.link(acc_color, store.inputs['Value'])
+        # Solid-mode "Attribute" colouring only reads the mesh's *active*
+        # colour layer, which a layer created in nodes never is.  Joining the
+        # (empty) original mesh first makes the result inherit its active
+        # colour layer name, so the blend shows in Solid mode too.
+        ensure_color_layer(fusion_ob)
+        join_out = b.node('GeometryNodeJoinGeometry', 'COLOR_JOIN')
+        # The last-linked input becomes the first joined component, and the
+        # joined mesh inherits that component's active colour layer.  The
+        # fusion's own mesh is a single "carrier" vertex with the layer set.
+        tree.links.new(store.outputs[0], join_out.inputs[0])
+        tree.links.new(gi.outputs[0], join_out.inputs[0])
+        neighbors = b.node('GeometryNodeInputMeshVertexNeighbors')
+        loose = b.math('LESS_THAN', neighbors.outputs['Face Count'], 0.5)
+        delete = b.node('GeometryNodeDeleteGeometry', 'COLOR_CARRIER_DELETE')
+        delete.domain = 'POINT'
+        delete.mode = 'ALL'
+        b.link(join_out.outputs[0], delete.inputs['Geometry'])
+        b.link(loose, delete.inputs['Selection'])
+        mesh_out = delete.outputs[0]
 
     # Grid to Mesh output carries no material; apply the fusion object's own.
     setmat = b.node('GeometryNodeSetMaterial', 'SET_MATERIAL')
-    b.link(smooth.outputs[0], setmat.inputs['Geometry'])
+    b.link(mesh_out, setmat.inputs['Geometry'])
     setmat.inputs['Material'].default_value = fusion_ob.active_material
     b.link(setmat.outputs[0], go.inputs[0])
 
@@ -603,6 +686,9 @@ def update_shape_values(fusion_ob, shape_ob):
         return
     prim.inputs['Rounding'].default_value = st.rounding
     prim.inputs['Param'].default_value = shape_param(st)
+    cnode = tree.nodes.get(f'COLOR_{i}')
+    if cnode is not None:
+        set_color_node(cnode, st.color)
     opn = tree.nodes.get(f'OP_{i}')
     if opn is not None and st.use_custom_blend:
         opn.inputs['Blend'].default_value = st.blend
@@ -610,6 +696,24 @@ def update_shape_values(fusion_ob, shape_ob):
     pad = tree.nodes.get('PAD_BLEND')
     if pad is not None:
         pad.outputs[0].default_value = max_custom_blend(fusion_ob)
+
+
+def ensure_color_layer(fusion_ob):
+    """Give the fusion's own (empty) mesh an active 'Color' layer."""
+    me = fusion_ob.data
+    if me is None or not hasattr(me, 'color_attributes'):
+        return
+    if len(me.vertices) == 0:
+        # one carrier vertex; it is removed again inside the node tree
+        me.from_pydata([(0.0, 0.0, 0.0)], [], [])
+    ca = me.color_attributes.get(COLOR_ATTRIBUTE)
+    if ca is None:
+        ca = me.color_attributes.new(COLOR_ATTRIBUTE, 'FLOAT_COLOR', 'POINT')
+    try:
+        me.color_attributes.active_color = ca
+        me.color_attributes.render_color_index = me.color_attributes.find(COLOR_ATTRIBUTE)
+    except Exception:
+        pass
 
 
 def sync_material(fusion_ob):
@@ -676,7 +780,7 @@ def build_field_sampler(fusion_ob, sampler_ob, attribute_name='sdf'):
     blend = b.value(settings.blend, 'GLOBAL_BLEND')
     steps = b.value(float(settings.steps), 'GLOBAL_STEPS')
     position = b.node('GeometryNodeInputPosition').outputs[0]
-    acc = build_field(b, fusion_ob, shapes, position, blend, steps)
+    acc, _acc_color = build_field(b, fusion_ob, shapes, position, blend, steps)
     store = b.node('GeometryNodeStoreNamedAttribute')
     store.data_type = 'FLOAT'
     store.domain = 'POINT'

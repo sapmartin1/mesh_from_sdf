@@ -17,6 +17,8 @@ Blender evaluates natively on every platform.  See
 
 ![Sidebar panel with a smooth union](docs/ui_smooth_union.png)
 
+![Blended colours](docs/ui_blend_colors.png)
+
 ## Requirements
 
 * Blender 5.0 or newer (developed against 5.1, targeted at 5.2 LTS)
@@ -25,7 +27,7 @@ Blender evaluates natively on every platform.  See
 
 ## Installation
 
-1. Download `sdf_fusion-1.0.0.zip` (or build it, see below).
+1. Download `sdf_fusion-1.1.0.zip` (or build it, see below).
 2. Drag and drop the ZIP into a Blender window, or use
    *Edit > Preferences > Get Extensions > (dropdown) > Install from Disk...*
 3. Enable **SDF Fusion** if it is not enabled automatically.
@@ -58,6 +60,8 @@ SDF Fusion
     Quality        Low / Medium / High / Custom     (preview resolution)
     Adaptivity     merge flat areas
     Live Update    pause the live mesh on heavy scenes
+    Blend Colors   per-shape colours that cross-fade over the blend
+    Material       the fusion's material
 
   Final Resolution
   [ Convert to Mesh ]
@@ -81,6 +85,21 @@ SDF Fusion
    Resolution** and click **Convert to Mesh**.  A new, ordinary mesh object
    is created at the final resolution; the fusion setup is hidden but kept
    so you can keep editing and convert again.
+
+### Colours
+
+The fused result is one mesh, so it cannot carry one material per source
+shape.  Instead each shape has a **Color** (in the shape box; the material
+icon next to it copies the colour of the shape's own material).  Turn on
+**Blend Colors** in the fusion box: the colours are mixed with the same
+factor as the distances, so they cross-fade over the blend width exactly
+where the surfaces melt, a hard union switches sharply at the seam, and a
+subtraction paints the cut with the cutter's colour.  The result is stored on
+the mesh as a `Color` attribute; the add-on assigns a material
+("SDF Fusion Colors") that reads it, and switches Solid-mode viewports to
+*Color: Attribute* so it shows immediately.  To use your own material, add a
+*Color Attribute* node (name `Color`) to it, or click **Use Color Material**.
+Convert to Mesh keeps the attribute and the material.
 
 Tips
 
