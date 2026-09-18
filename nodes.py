@@ -1,0 +1,687 @@
+# SPDX-License-Identifier: MIT
+"""
+Geometry Nodes "compiler" for SDF Fusion.
+
+The original *Mesh from SDF* add-on evaluated its distance field with GLSL
+compute shaders through ModernGL (OpenGL 4.3 + SSBOs).  That path cannot exist
+on macOS / Metal, so this module builds the very same distance field as a
+Geometry Nodes tree instead:
+
+    for every shape:  Object Info -> rigid inverse -> Transform Point
+                      -> primitive node group  (sdBox, sdSphere, ...)
+    chain:            op node group (union / subtract / intersect, blended)
+    grid:             Volume Cube (density = -distance) -> Get Named Grid
+                      -> Grid to Mesh (threshold 0) -> Set Shade Smooth
+
+Blender evaluates that tree natively (multithreaded C++, OpenVDB meshing), so
+the result updates live whenever a source object moves and the same tree is
+used for the final high-resolution bake.  The maths is a 1:1 port of the
+upstream GLSL library (see ``sdf_ref.py`` for the readable reference).
+"""
+
+import bpy
+
+GROUP_VERSION = 1
+MODIFIER_NAME = "SDF Fusion"
+TREE_PREFIX = "SDFF Tree"
+GRID_NAME = "density"
+EPS_BLEND = 1e-4
+SQRT05 = 0.70710678118
+
+PRIMITIVES = ('BOX', 'SPHERE', 'CYLINDER', 'TORUS', 'CONE')
+OPERATIONS = ('UNION', 'SUBTRACT', 'INTERSECT')
+BLEND_TYPES = ('NONE', 'SMOOTH', 'ROUND', 'CHAMFER', 'STEPS')
+
+
+# ----------------------------------------------------------------------------
+# tiny node-building DSL
+# ----------------------------------------------------------------------------
+
+class _Builder:
+    """Wraps a node tree with helpers that accept sockets *or* constants."""
+
+    def __init__(self, tree):
+        self.tree = tree
+        self._count = 0
+
+    def node(self, idname, name=None, **props):
+        n = self.tree.nodes.new(idname)
+        if name:
+            n.name = name
+            n.label = name
+        for k, v in props.items():
+            setattr(n, k, v)
+        # crude grid layout so the tree stays readable when opened by a user
+        self._count += 1
+        col = self._count % 24
+        row = self._count // 24
+        n.location = (col * 190.0, -row * 260.0)
+        return n
+
+    def link(self, src, dst):
+        if isinstance(src, bpy.types.NodeSocket):
+            self.tree.links.new(src, dst)
+        elif src is not None:
+            dst.default_value = src
+
+    def math(self, op, a, b=None, c=None, name=None):
+        n = self.node('ShaderNodeMath', name, operation=op)
+        self.link(a, n.inputs[0])
+        if b is not None:
+            self.link(b, n.inputs[1])
+        if c is not None:
+            self.link(c, n.inputs[2])
+        return n.outputs[0]
+
+    def vmath(self, op, a, b=None, scale=None):
+        n = self.node('ShaderNodeVectorMath', operation=op)
+        self.link(a, n.inputs[0])
+        if b is not None:
+            self.link(b, n.inputs[1])
+        if scale is not None:
+            self.link(scale, n.inputs[3])
+        return n.outputs[0]
+
+    def vmath_f(self, op, a, b=None):
+        """Vector Math variants with a scalar result (LENGTH, DOT_PRODUCT...)."""
+        n = self.node('ShaderNodeVectorMath', operation=op)
+        self.link(a, n.inputs[0])
+        if b is not None:
+            self.link(b, n.inputs[1])
+        return n.outputs[1]
+
+    def sep(self, v):
+        n = self.node('ShaderNodeSeparateXYZ')
+        self.link(v, n.inputs[0])
+        return n.outputs[0], n.outputs[1], n.outputs[2]
+
+    def comb(self, x, y, z):
+        n = self.node('ShaderNodeCombineXYZ')
+        self.link(x, n.inputs[0])
+        self.link(y, n.inputs[1])
+        self.link(z, n.inputs[2])
+        return n.outputs[0]
+
+    def value(self, v, name=None):
+        n = self.node('ShaderNodeValue', name)
+        n.outputs[0].default_value = float(v)
+        return n.outputs[0]
+
+    def integer(self, v, name=None):
+        n = self.node('FunctionNodeInputInt', name)
+        n.integer = int(v)
+        return n.outputs[0]
+
+    def group(self, node_group, name=None):
+        n = self.node('GeometryNodeGroup', name)
+        n.node_tree = node_group
+        return n
+
+    # convenience compositions -------------------------------------------------
+    def min3(self, x, y, z):
+        return self.math('MINIMUM', self.math('MINIMUM', x, y), z)
+
+    def max3(self, x, y, z):
+        return self.math('MAXIMUM', self.math('MAXIMUM', x, y), z)
+
+    def clamp01(self, x):
+        return self.math('MINIMUM', self.math('MAXIMUM', x, 0.0), 1.0)
+
+    def mix(self, a, b, t):
+        # a + (b - a) * t
+        return self.math('MULTIPLY_ADD', self.math('SUBTRACT', b, a), t, a)
+
+    def neg(self, x):
+        return self.math('MULTIPLY', x, -1.0)
+
+
+def _new_group(name, inputs, outputs):
+    ng = bpy.data.node_groups.new(name, 'GeometryNodeTree')
+    for nm, stype, default in inputs:
+        s = ng.interface.new_socket(nm, in_out='INPUT', socket_type=stype)
+        if default is not None:
+            s.default_value = default
+    for nm, stype in outputs:
+        ng.interface.new_socket(nm, in_out='OUTPUT', socket_type=stype)
+    b = _Builder(ng)
+    gi = b.node('NodeGroupInput')
+    go = b.node('NodeGroupOutput')
+    return ng, b, gi, go
+
+
+_PRIM_INPUTS = [
+    ('Position', 'NodeSocketVector', None),
+    ('Scale', 'NodeSocketVector', (1.0, 1.0, 1.0)),
+    ('Rounding', 'NodeSocketFloat', 0.0),
+    ('Param', 'NodeSocketFloat', 0.0),
+]
+_PRIM_OUTPUTS = [('Distance', 'NodeSocketFloat')]
+
+
+# ----------------------------------------------------------------------------
+# primitive node groups (ports of sdBox / sdSphere / sdCylinder / sdCappedTorus
+# / sdCappedCone, Z-up, evaluated in the shape's unit frame)
+# ----------------------------------------------------------------------------
+
+def _build_box(name):
+    ng, b, gi, go = _new_group(name, _PRIM_INPUTS, _PRIM_OUTPUTS)
+    P, S, R = gi.outputs['Position'], gi.outputs['Scale'], gi.outputs['Rounding']
+    half = b.vmath('MAXIMUM', b.vmath('SUBTRACT', S, b.comb(R, R, R)), (0.0, 0.0, 0.0))
+    q = b.vmath('SUBTRACT', b.vmath('ABSOLUTE', P), half)
+    outside = b.vmath_f('LENGTH', b.vmath('MAXIMUM', q, (0.0, 0.0, 0.0)))
+    qx, qy, qz = b.sep(q)
+    inside = b.math('MINIMUM', b.max3(qx, qy, qz), 0.0)
+    d = b.math('SUBTRACT', b.math('ADD', outside, inside), R)
+    b.link(d, go.inputs['Distance'])
+    return ng
+
+
+def _build_sphere(name):
+    ng, b, gi, go = _new_group(name, _PRIM_INPUTS, _PRIM_OUTPUTS)
+    P, S = gi.outputs['Position'], gi.outputs['Scale']
+    sx, sy, sz = b.sep(S)
+    smin = b.min3(sx, sy, sz)
+    pn = b.vmath('DIVIDE', P, S)
+    d = b.math('MULTIPLY', b.math('SUBTRACT', b.vmath_f('LENGTH', pn), 1.0), smin)
+    b.link(d, go.inputs['Distance'])
+    return ng
+
+
+def _build_cylinder(name):
+    ng, b, gi, go = _new_group(name, _PRIM_INPUTS, _PRIM_OUTPUTS)
+    P, S, R = gi.outputs['Position'], gi.outputs['Scale'], gi.outputs['Rounding']
+    px, py, pz = b.sep(P)
+    sx, sy, sz = b.sep(S)
+    rmin = b.math('MINIMUM', sx, sy)
+    radial_n = b.vmath_f('LENGTH', b.comb(b.math('DIVIDE', px, sx), b.math('DIVIDE', py, sy), 0.0))
+    radial = b.math('MULTIPLY', b.math('SUBTRACT', radial_n, 1.0), rmin)
+    axial = b.math('SUBTRACT', b.math('ABSOLUTE', pz), sz)
+    dx = b.math('ADD', radial, R)
+    dy = b.math('ADD', axial, R)
+    inside = b.math('MINIMUM', b.math('MAXIMUM', dx, dy), 0.0)
+    outside = b.vmath_f('LENGTH', b.comb(b.math('MAXIMUM', dx, 0.0), b.math('MAXIMUM', dy, 0.0), 0.0))
+    d = b.math('SUBTRACT', b.math('ADD', inside, outside), R)
+    b.link(d, go.inputs['Distance'])
+    return ng
+
+
+def _build_torus(name):
+    ng, b, gi, go = _new_group(name, _PRIM_INPUTS, _PRIM_OUTPUTS)
+    P, S, tube = gi.outputs['Position'], gi.outputs['Scale'], gi.outputs['Param']
+    sx, sy, sz = b.sep(S)
+    smin = b.min3(sx, sy, sz)
+    pn = b.vmath('DIVIDE', P, S)
+    pnx, pny, pnz = b.sep(pn)
+    qx = b.math('SUBTRACT', b.vmath_f('LENGTH', b.comb(pnx, pny, 0.0)), 1.0)
+    d = b.math('MULTIPLY', b.math('SUBTRACT', b.vmath_f('LENGTH', b.comb(qx, pnz, 0.0)), tube), smin)
+    b.link(d, go.inputs['Distance'])
+    return ng
+
+
+def _build_cone(name):
+    ng, b, gi, go = _new_group(name, _PRIM_INPUTS, _PRIM_OUTPUTS)
+    P, S, r1 = gi.outputs['Position'], gi.outputs['Scale'], gi.outputs['Param']
+    sx, sy, sz = b.sep(S)
+    smin = b.min3(sx, sy, sz)
+    pn = b.vmath('DIVIDE', P, S)
+    pnx, pny, qz = b.sep(pn)
+    qx = b.vmath_f('LENGTH', b.comb(pnx, pny, 0.0))
+    # h = 1, r0 = 1 (base at z=-1), r1 = Param (top at z=+1)
+    lt = b.math('LESS_THAN', qz, 0.0)                       # 1 when below the mid plane
+    r0_minus_r1 = b.math('SUBTRACT', 1.0, r1)
+    rsel = b.math('MULTIPLY_ADD', r0_minus_r1, lt, r1)       # r1 + (r0 - r1) * lt
+    cax = b.math('SUBTRACT', qx, b.math('MINIMUM', qx, rsel))
+    cay = b.math('SUBTRACT', b.math('ABSOLUTE', qz), 1.0)
+    k2x = b.math('SUBTRACT', r1, 1.0)                        # r1 - r0
+    dotk = b.math('MULTIPLY_ADD', b.math('SUBTRACT', r1, qx), k2x,
+                  b.math('MULTIPLY', b.math('SUBTRACT', 1.0, qz), 2.0))
+    dot2k2 = b.math('MULTIPLY_ADD', k2x, k2x, 4.0)
+    t = b.clamp01(b.math('DIVIDE', dotk, dot2k2))
+    cbx = b.math('MULTIPLY_ADD', k2x, t, b.math('SUBTRACT', qx, r1))
+    cby = b.math('MULTIPLY_ADD', t, 2.0, b.math('SUBTRACT', qz, 1.0))
+    both = b.math('MULTIPLY', b.math('LESS_THAN', cbx, 0.0), b.math('LESS_THAN', cay, 0.0))
+    sgn = b.math('MULTIPLY_ADD', both, -2.0, 1.0)
+    dca = b.math('MULTIPLY_ADD', cax, cax, b.math('MULTIPLY', cay, cay))
+    dcb = b.math('MULTIPLY_ADD', cbx, cbx, b.math('MULTIPLY', cby, cby))
+    d = b.math('MULTIPLY', b.math('MULTIPLY', sgn, b.math('SQRT', b.math('MINIMUM', dca, dcb))), smin)
+    b.link(d, go.inputs['Distance'])
+    return ng
+
+
+_PRIM_BUILDERS = {
+    'BOX': _build_box,
+    'SPHERE': _build_sphere,
+    'CYLINDER': _build_cylinder,
+    'TORUS': _build_torus,
+    'CONE': _build_cone,
+}
+
+
+def primitive_group(primitive):
+    name = f"SDFF {primitive.title()} v{GROUP_VERSION}"
+    ng = bpy.data.node_groups.get(name)
+    if ng is None:
+        ng = _PRIM_BUILDERS[primitive](name)
+    return ng
+
+
+# ----------------------------------------------------------------------------
+# boolean / blend node groups (ports of opUnion, opSmoothUnion, opRoundUnion,
+# opChampferUnion, opStairsUnion and their difference / intersection variants)
+#
+# Convention: ``Distance`` is the NEW shape (d0), ``Accumulated`` is the result
+# so far (d1); SUBTRACT removes the new shape from the accumulated result.
+# ----------------------------------------------------------------------------
+
+_OP_INPUTS = [
+    ('Distance', 'NodeSocketFloat', 0.0),
+    ('Accumulated', 'NodeSocketFloat', 0.0),
+    ('Blend', 'NodeSocketFloat', 0.0),
+    ('Steps', 'NodeSocketFloat', 1.0),
+]
+_OP_OUTPUTS = [('Result', 'NodeSocketFloat')]
+
+
+def _build_op(name, operation, blend_type):
+    ng, b, gi, go = _new_group(name, _OP_INPUTS, _OP_OUTPUTS)
+    d0, d1 = gi.outputs['Distance'], gi.outputs['Accumulated']
+    k = b.math('MAXIMUM', gi.outputs['Blend'], EPS_BLEND)
+    n = b.math('MAXIMUM', gi.outputs['Steps'], 1.0)
+
+    if blend_type == 'NONE':
+        if operation == 'UNION':
+            res = b.math('MINIMUM', d0, d1)
+        elif operation == 'SUBTRACT':
+            res = b.math('MAXIMUM', b.neg(d0), d1)
+        else:
+            res = b.math('MAXIMUM', d0, d1)
+
+    elif blend_type == 'SMOOTH':
+        if operation == 'UNION':
+            h = b.clamp01(b.math('MULTIPLY_ADD', b.math('DIVIDE', b.math('SUBTRACT', d1, d0), k), 0.5, 0.5))
+            bulge = b.math('MULTIPLY', k, b.math('MULTIPLY', h, b.math('SUBTRACT', 1.0, h)))
+            res = b.math('SUBTRACT', b.mix(d1, d0, h), bulge)
+        elif operation == 'SUBTRACT':
+            h = b.clamp01(b.math('MULTIPLY_ADD', b.math('DIVIDE', b.math('ADD', d1, d0), k), -0.5, 0.5))
+            bulge = b.math('MULTIPLY', k, b.math('MULTIPLY', h, b.math('SUBTRACT', 1.0, h)))
+            res = b.math('ADD', b.mix(d1, b.neg(d0), h), bulge)
+        else:
+            h = b.clamp01(b.math('MULTIPLY_ADD', b.math('DIVIDE', b.math('SUBTRACT', d1, d0), k), -0.5, 0.5))
+            bulge = b.math('MULTIPLY', k, b.math('MULTIPLY', h, b.math('SUBTRACT', 1.0, h)))
+            res = b.math('ADD', b.mix(d1, d0, h), bulge)
+
+    elif blend_type == 'ROUND':
+        if operation == 'UNION':
+            ux = b.math('MAXIMUM', b.math('SUBTRACT', k, d0), 0.0)
+            uy = b.math('MAXIMUM', b.math('SUBTRACT', k, d1), 0.0)
+            ulen = b.math('SQRT', b.math('MULTIPLY_ADD', ux, ux, b.math('MULTIPLY', uy, uy)))
+            res = b.math('SUBTRACT', b.math('MAXIMUM', k, b.math('MINIMUM', d0, d1)), ulen)
+        elif operation == 'SUBTRACT':
+            # round intersection of (-d0, d1)
+            ux = b.math('MAXIMUM', b.math('SUBTRACT', k, d0), 0.0)
+            uy = b.math('MAXIMUM', b.math('ADD', k, d1), 0.0)
+            ulen = b.math('SQRT', b.math('MULTIPLY_ADD', ux, ux, b.math('MULTIPLY', uy, uy)))
+            res = b.math('ADD', b.math('MINIMUM', b.neg(k), b.math('MAXIMUM', b.neg(d0), d1)), ulen)
+        else:
+            ux = b.math('MAXIMUM', b.math('ADD', k, d0), 0.0)
+            uy = b.math('MAXIMUM', b.math('ADD', k, d1), 0.0)
+            ulen = b.math('SQRT', b.math('MULTIPLY_ADD', ux, ux, b.math('MULTIPLY', uy, uy)))
+            res = b.math('ADD', b.math('MINIMUM', b.neg(k), b.math('MAXIMUM', d0, d1)), ulen)
+
+    elif blend_type == 'CHAMFER':
+        if operation == 'UNION':
+            diag = b.math('MULTIPLY', b.math('ADD', b.math('SUBTRACT', d0, k), d1), SQRT05)
+            res = b.math('MINIMUM', b.math('MINIMUM', d0, d1), diag)
+        elif operation == 'SUBTRACT':
+            nd0 = b.neg(d0)
+            diag = b.math('MULTIPLY', b.math('ADD', b.math('ADD', nd0, k), d1), SQRT05)
+            res = b.math('MAXIMUM', b.math('MAXIMUM', nd0, d1), diag)
+        else:
+            diag = b.math('MULTIPLY', b.math('ADD', b.math('ADD', d0, k), d1), SQRT05)
+            res = b.math('MAXIMUM', b.math('MAXIMUM', d0, d1), diag)
+
+    elif blend_type == 'STEPS':
+        def stairs_union(a, c):
+            s_ = b.math('DIVIDE', k, n)
+            u = b.math('SUBTRACT', c, k)
+            m = b.math('FLOORED_MODULO', b.math('ADD', b.math('SUBTRACT', u, a), s_), b.math('MULTIPLY', s_, 2.0))
+            t = b.math('ABSOLUTE', b.math('SUBTRACT', m, s_))
+            stair = b.math('MULTIPLY', b.math('ADD', b.math('ADD', u, a), t), 0.5)
+            return b.math('MINIMUM', b.math('MINIMUM', a, c), stair)
+        if operation == 'UNION':
+            res = stairs_union(d0, d1)
+        elif operation == 'SUBTRACT':
+            res = b.neg(stairs_union(b.neg(d1), d0))
+        else:
+            res = b.neg(stairs_union(b.neg(d0), b.neg(d1)))
+    else:
+        raise ValueError(blend_type)
+
+    b.link(res, go.inputs['Result'])
+    return ng
+
+
+def op_group(operation, blend_type):
+    name = f"SDFF Op {operation.title()} {blend_type.title()} v{GROUP_VERSION}"
+    ng = bpy.data.node_groups.get(name)
+    if ng is None:
+        ng = _build_op(name, operation, blend_type)
+    return ng
+
+
+# ----------------------------------------------------------------------------
+# fusion tree
+# ----------------------------------------------------------------------------
+
+def shape_param(shape_settings):
+    """The single free parameter of a primitive (tube ratio / cone top radius)."""
+    if shape_settings.primitive == 'TORUS':
+        return shape_settings.tube
+    if shape_settings.primitive == 'CONE':
+        return shape_settings.top_radius
+    return 0.0
+
+
+def iter_shapes(fusion_ob):
+    """Valid, included shape objects of a fusion, in evaluation order."""
+    for ref in fusion_ob.sdf_fusion.shapes:
+        ob = ref.object
+        if ob is None:
+            continue
+        st = ob.sdf_shape
+        if not st.enabled or not st.include:
+            continue
+        yield ob
+
+
+def get_modifier(fusion_ob, create=True):
+    mod = fusion_ob.modifiers.get(MODIFIER_NAME)
+    if mod is None and create:
+        mod = fusion_ob.modifiers.new(MODIFIER_NAME, 'NODES')
+    return mod
+
+
+def get_tree(fusion_ob, create=True):
+    mod = get_modifier(fusion_ob, create)
+    if mod is None:
+        return None
+    tree = mod.node_group
+    if tree is None and create:
+        tree = bpy.data.node_groups.new(f"{TREE_PREFIX}: {fusion_ob.name}", 'GeometryNodeTree')
+        tree.is_modifier = True
+        mod.node_group = tree
+    return tree
+
+
+def _ensure_interface(tree):
+    has_in = any(i.item_type == 'SOCKET' and i.in_out == 'INPUT' for i in tree.interface.items_tree)
+    has_out = any(i.item_type == 'SOCKET' and i.in_out == 'OUTPUT' for i in tree.interface.items_tree)
+    if not has_in:
+        tree.interface.new_socket('Geometry', in_out='INPUT', socket_type='NodeSocketGeometry')
+    if not has_out:
+        tree.interface.new_socket('Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
+
+
+def build_field(b, fusion_ob, shapes, position, global_blend, global_steps):
+    """Emit the distance field for ``shapes``; returns the accumulated socket.
+
+    Shared by the modifier tree and by the test-suite's field sampler.
+    """
+    settings = fusion_ob.sdf_fusion
+    acc = None
+    for i, sh in enumerate(shapes):
+        st = sh.sdf_shape
+        oi = b.node('GeometryNodeObjectInfo', f'OBJ_{i}')
+        oi.transform_space = 'RELATIVE'
+        oi.inputs['Object'].default_value = sh
+        oi.inputs['As Instance'].default_value = False
+        sep = b.node('FunctionNodeSeparateTransform')
+        b.link(oi.outputs['Transform'], sep.inputs[0])
+        rigid = b.node('FunctionNodeCombineTransform')
+        b.link(sep.outputs['Translation'], rigid.inputs['Translation'])
+        b.link(sep.outputs['Rotation'], rigid.inputs['Rotation'])
+        rigid.inputs['Scale'].default_value = (1.0, 1.0, 1.0)
+        inv = b.node('FunctionNodeInvertMatrix')
+        b.link(rigid.outputs[0], inv.inputs[0])
+        tp = b.node('FunctionNodeTransformPoint')
+        b.link(position, tp.inputs['Vector'])
+        b.link(inv.outputs['Matrix'], tp.inputs['Transform'])
+
+        prim = b.group(primitive_group(st.primitive), f'PRIM_{i}')
+        b.link(tp.outputs[0], prim.inputs['Position'])
+        b.link(sep.outputs['Scale'], prim.inputs['Scale'])
+        prim.inputs['Rounding'].default_value = st.rounding
+        prim.inputs['Param'].default_value = shape_param(st)
+        d = prim.outputs['Distance']
+
+        if acc is None:
+            acc = d
+            continue
+        btype = st.blend_type if st.use_custom_blend else settings.blend_type
+        opn = b.group(op_group(st.operation, btype), f'OP_{i}')
+        b.link(d, opn.inputs['Distance'])
+        b.link(acc, opn.inputs['Accumulated'])
+        if st.use_custom_blend:
+            opn.inputs['Blend'].default_value = st.blend
+            opn.inputs['Steps'].default_value = float(st.steps)
+        else:
+            b.link(global_blend, opn.inputs['Blend'])
+            b.link(global_steps, opn.inputs['Steps'])
+        acc = opn.outputs['Result']
+    return acc
+
+
+def max_custom_blend(fusion_ob):
+    m = 0.0
+    for sh in iter_shapes(fusion_ob):
+        if sh.sdf_shape.use_custom_blend:
+            m = max(m, sh.sdf_shape.blend)
+    return m
+
+
+def rebuild(fusion_ob):
+    """(Re)generate the whole modifier tree from the fusion's shape list."""
+    settings = fusion_ob.sdf_fusion
+    tree = get_tree(fusion_ob)
+    tree.nodes.clear()
+    _ensure_interface(tree)
+    b = _Builder(tree)
+    gi = b.node('NodeGroupInput')
+    go = b.node('NodeGroupOutput')
+
+    shapes = list(iter_shapes(fusion_ob))
+    if not shapes:
+        b.link(gi.outputs[0], go.inputs[0])
+        return tree
+
+    blend = b.value(settings.blend, 'GLOBAL_BLEND')
+    steps = b.value(float(settings.steps), 'GLOBAL_STEPS')
+    resolution = b.integer(settings.live_resolution(), 'RESOLUTION')
+    adaptivity = b.value(settings.adaptivity, 'ADAPTIVITY')
+    pad_blend = b.value(max_custom_blend(fusion_ob), 'PAD_BLEND')
+    position = b.node('GeometryNodeInputPosition').outputs[0]
+
+    acc = build_field(b, fusion_ob, shapes, position, blend, steps)
+
+    # bounds: union of the proxy meshes (already in fusion-local space)
+    join = b.node('GeometryNodeJoinGeometry', 'BOUNDS_JOIN')
+    for i in range(len(shapes)):
+        oi = tree.nodes[f'OBJ_{i}']
+        tree.links.new(oi.outputs['Geometry'], join.inputs[0])
+    bbox = b.node('GeometryNodeBoundBox')
+    b.link(join.outputs[0], bbox.inputs[0])
+    mn, mx = bbox.outputs['Min'], bbox.outputs['Max']
+    ex, ey, ez = b.sep(b.vmath('SUBTRACT', mx, mn))
+    voxel0 = b.math('DIVIDE', b.max3(ex, ey, ez), resolution)
+    pad = b.math('ADD', b.math('MAXIMUM', blend, pad_blend), b.math('MULTIPLY_ADD', voxel0, 2.0, 0.001))
+    padv = b.comb(pad, pad, pad)
+    mn2 = b.vmath('SUBTRACT', mn, padv)
+    mx2 = b.vmath('ADD', mx, padv)
+    ex2, ey2, ez2 = b.sep(b.vmath('SUBTRACT', mx2, mn2))
+    voxel = b.math('DIVIDE', b.max3(ex2, ey2, ez2), resolution)
+
+    def res_axis(extent):
+        f = b.math('MAXIMUM', b.math('ADD', b.math('DIVIDE', extent, voxel), 1.0), 2.0)
+        n = b.node('FunctionNodeFloatToInt')
+        n.rounding_mode = 'CEILING'
+        b.link(f, n.inputs[0])
+        return n.outputs[0]
+
+    density = b.neg(acc)
+    vc = b.node('GeometryNodeVolumeCube', 'VOLUME_CUBE')
+    b.link(density, vc.inputs['Density'])
+    vc.inputs['Background'].default_value = -1.0
+    b.link(mn2, vc.inputs['Min'])
+    b.link(mx2, vc.inputs['Max'])
+    b.link(res_axis(ex2), vc.inputs['Resolution X'])
+    b.link(res_axis(ey2), vc.inputs['Resolution Y'])
+    b.link(res_axis(ez2), vc.inputs['Resolution Z'])
+
+    grid = b.node('GeometryNodeGetNamedGrid')
+    grid.data_type = 'FLOAT'
+    grid.inputs['Name'].default_value = GRID_NAME
+    b.link(vc.outputs['Volume'], grid.inputs['Volume'])
+
+    g2m = b.node('GeometryNodeGridToMesh', 'GRID_TO_MESH')
+    b.link(grid.outputs['Grid'], g2m.inputs['Grid'])
+    g2m.inputs['Threshold'].default_value = 0.0
+    b.link(adaptivity, g2m.inputs['Adaptivity'])
+
+    smooth = b.node('GeometryNodeSetShadeSmooth')
+    b.link(g2m.outputs['Mesh'], smooth.inputs[0])
+    smooth.inputs['Shade Smooth'].default_value = True
+
+    # Grid to Mesh output carries no material; apply the fusion object's own.
+    setmat = b.node('GeometryNodeSetMaterial', 'SET_MATERIAL')
+    b.link(smooth.outputs[0], setmat.inputs['Geometry'])
+    setmat.inputs['Material'].default_value = fusion_ob.active_material
+    b.link(setmat.outputs[0], go.inputs[0])
+
+    mod = get_modifier(fusion_ob)
+    mod.show_viewport = settings.live
+    return tree
+
+
+def _shape_index(fusion_ob, shape_ob):
+    for i, sh in enumerate(iter_shapes(fusion_ob)):
+        if sh == shape_ob:
+            return i
+    return -1
+
+
+def update_values(fusion_ob):
+    """Push scalar settings into the existing tree without rebuilding it."""
+    settings = fusion_ob.sdf_fusion
+    tree = get_tree(fusion_ob, create=False)
+    if tree is None:
+        return
+    nodes = tree.nodes
+    needed = ('GLOBAL_BLEND', 'GLOBAL_STEPS', 'RESOLUTION', 'ADAPTIVITY', 'PAD_BLEND')
+    if any(n not in nodes for n in needed):
+        if any(True for _ in iter_shapes(fusion_ob)):
+            rebuild(fusion_ob)
+        return
+    nodes['GLOBAL_BLEND'].outputs[0].default_value = settings.blend
+    nodes['GLOBAL_STEPS'].outputs[0].default_value = float(settings.steps)
+    nodes['RESOLUTION'].integer = settings.live_resolution()
+    nodes['ADAPTIVITY'].outputs[0].default_value = settings.adaptivity
+    nodes['PAD_BLEND'].outputs[0].default_value = max_custom_blend(fusion_ob)
+    sync_material(fusion_ob)
+
+
+def update_shape_values(fusion_ob, shape_ob):
+    tree = get_tree(fusion_ob, create=False)
+    if tree is None:
+        return
+    i = _shape_index(fusion_ob, shape_ob)
+    if i < 0:
+        return
+    st = shape_ob.sdf_shape
+    prim = tree.nodes.get(f'PRIM_{i}')
+    if prim is None:
+        rebuild(fusion_ob)
+        return
+    prim.inputs['Rounding'].default_value = st.rounding
+    prim.inputs['Param'].default_value = shape_param(st)
+    opn = tree.nodes.get(f'OP_{i}')
+    if opn is not None and st.use_custom_blend:
+        opn.inputs['Blend'].default_value = st.blend
+        opn.inputs['Steps'].default_value = float(st.steps)
+    pad = tree.nodes.get('PAD_BLEND')
+    if pad is not None:
+        pad.outputs[0].default_value = max_custom_blend(fusion_ob)
+
+
+def sync_material(fusion_ob):
+    """Keep the Set Material node equal to the fusion object's active material."""
+    tree = get_tree(fusion_ob, create=False)
+    if tree is None:
+        return False
+    node = tree.nodes.get('SET_MATERIAL')
+    if node is None:
+        return False
+    mat = fusion_ob.active_material
+    if node.inputs['Material'].default_value != mat:
+        node.inputs['Material'].default_value = mat
+        return True
+    return False
+
+
+def set_resolution(fusion_ob, resolution):
+    tree = get_tree(fusion_ob, create=False)
+    if tree is None or 'RESOLUTION' not in tree.nodes:
+        return False
+    tree.nodes['RESOLUTION'].integer = int(resolution)
+    return True
+
+
+def evaluate_mesh(fusion_ob, resolution=None, context=None):
+    """Evaluate the fusion (optionally at another resolution) into a new Mesh datablock."""
+    context = context or bpy.context
+    settings = fusion_ob.sdf_fusion
+    mod = get_modifier(fusion_ob, create=False)
+    prev_show = mod.show_viewport if mod else True
+    if mod is not None and not prev_show:
+        mod.show_viewport = True
+    if resolution is not None:
+        set_resolution(fusion_ob, resolution)
+    try:
+        depsgraph = context.evaluated_depsgraph_get()
+        ev = fusion_ob.evaluated_get(depsgraph)
+        mesh = bpy.data.meshes.new_from_object(ev, preserve_all_data_layers=True, depsgraph=depsgraph)
+    finally:
+        if resolution is not None:
+            set_resolution(fusion_ob, settings.live_resolution())
+        if mod is not None and not prev_show:
+            mod.show_viewport = False
+    return mesh
+
+
+def build_field_sampler(fusion_ob, sampler_ob, attribute_name='sdf'):
+    """Test helper: store the fusion's distance field on ``sampler_ob``'s points.
+
+    ``sampler_ob`` must share the fusion's world matrix so 'Relative' object
+    transforms line up.
+    """
+    settings = fusion_ob.sdf_fusion
+    mod = sampler_ob.modifiers.get('SDFF Sampler') or sampler_ob.modifiers.new('SDFF Sampler', 'NODES')
+    tree = bpy.data.node_groups.new('SDFF Sampler', 'GeometryNodeTree')
+    tree.is_modifier = True
+    mod.node_group = tree
+    _ensure_interface(tree)
+    b = _Builder(tree)
+    gi = b.node('NodeGroupInput')
+    go = b.node('NodeGroupOutput')
+    shapes = list(iter_shapes(fusion_ob))
+    blend = b.value(settings.blend, 'GLOBAL_BLEND')
+    steps = b.value(float(settings.steps), 'GLOBAL_STEPS')
+    position = b.node('GeometryNodeInputPosition').outputs[0]
+    acc = build_field(b, fusion_ob, shapes, position, blend, steps)
+    store = b.node('GeometryNodeStoreNamedAttribute')
+    store.data_type = 'FLOAT'
+    store.domain = 'POINT'
+    b.link(gi.outputs[0], store.inputs['Geometry'])
+    store.inputs['Name'].default_value = attribute_name
+    b.link(acc, store.inputs['Value'])
+    b.link(store.outputs[0], go.inputs[0])
+    return tree

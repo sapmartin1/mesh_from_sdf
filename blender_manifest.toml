@@ -1,0 +1,28 @@
+schema_version = "1.0.0"
+
+id = "sdf_fusion"
+version = "1.0.0"
+name = "SDF Fusion"
+tagline = "Melt boxes, spheres and cylinders together with live blending"
+maintainer = "Martin Sap <martin@simonwhistler.com>"
+type = "add-on"
+
+website = "https://github.com/sapmartin1/mesh_from_sdf"
+tags = ["Modeling", "Object"]
+blender_version_min = "5.0.0"
+license = ["SPDX:MIT"]
+copyright = [
+  "2025 TLabAltoh",
+  "2026 Martin Sap",
+]
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "/.git/",
+  "/.gitignore",
+  "/tests/",
+  "/docs/",
+  "/dist/",
+  "/*.zip",
+]

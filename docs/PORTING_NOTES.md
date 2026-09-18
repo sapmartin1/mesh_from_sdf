@@ -1,0 +1,144 @@
+# Porting notes: Mesh from SDF (Blender 4.x, ModernGL) -> SDF Fusion (Blender 5.x)
+
+This is the record of what was inspected, what broke, what was decided and
+what was kept.  Upstream base commit: `61ab4ca` of
+https://github.com/TLabAltoh/mesh_from_sdf (MIT).
+
+## 1. What the upstream add-on is made of
+
+| Upstream file | Role | Fate in the port |
+|---|---|---|
+| `__init__.py` (1150 lines) | `bl_info`, per-primitive `CollectionProperty` lists on the Scene, hierarchy UIList, add/remove/reorder operators, `create_context()` for ModernGL at `register()`, depsgraph handler that rewrites SSBOs | Replaced by `props.py`, `ops.py`, `ui.py`, `handlers.py` |
+| `shader/common.py` (411 lines) | GLSL library: `sdBox`, `sdSphere`, `sdCylinder`, `sdCappedCone`, `sdCappedTorus`, ..., `opSmoothUnion`, `opRoundUnion`, `opChampferUnion`, `opStairsUnion` and difference/intersection variants | **Kept as maths.** Ported 1:1 to numpy (`sdf_ref.py`, the reference) and to Geometry Nodes groups (`nodes.py`) |
+| `shader/factory.py` | Generates the GLSL `getDist()` from the hierarchy | Replaced by `nodes.build_field()` which chains the same operators in the same order (new shape first, accumulated result second) |
+| `shader/buffer_factory.py` (1476 lines) | numpy -> ModernGL SSBOs per primitive, incremental updates | Not needed: shape transforms are read by Object Info nodes, scalar settings are written into node sockets |
+| `raymarching.py` | Fullscreen raymarch in a `gpu.types.GPUShader` whose SSBOs are bound through ModernGL | Removed (see 2.2); the live preview is now the real mesh |
+| `render_engine.py` | Custom `RenderEngine` that draws the raymarch | Removed; no custom render engine, the result renders in EEVEE/Cycles like any mesh |
+| `marching_cube.py`, `marching_tables.py` | GL 4.3 compute-shader marching cubes into SSBOs, chunked 128^3, `mesh.from_pydata` | Replaced by Volume Cube -> Grid to Mesh (OpenVDB) |
+| `pointer.py` | Per-primitive PropertyGroups + proxy meshes built with `bpy.ops.mesh.primitive_*` in edit mode | Replaced by `SDFShapeSettings` and `bmesh` proxy generation (no operator/mode juggling) |
+| `gizmo/*.py` | Arrow gizmos per primitive parameter | Dropped for v1: sizes are the object's scale, so the standard transform gizmos do the job |
+| `util/moderngl.py`, `util/pymodule.py` | ModernGL context + pip installer | Removed |
+
+## 2. Blender 5.x / macOS incompatibilities found
+
+### 2.1 Confirmed, fundamental (platform)
+
+* **ModernGL cannot provide OpenGL 4.3 on macOS.**  Measured on this Apple
+  M5 machine with ModernGL 5.12: `ctx.version_code == 410`,
+  `GL_VERSION = "4.1 Metal - 90.5"`, and `ctx.compute_shader()` fails with
+  "cannot create shader".  Upstream asserts `version_code >= 430` in
+  `create_context()`, which runs at `register()`, so the add-on cannot even
+  be enabled on a Mac.  Compute shaders and SSBOs simply do not exist in
+  Apple's OpenGL.
+* **Blender on macOS runs on Metal**, and `raymarching.py` relies on
+  ModernGL binding SSBOs into the *same OpenGL context* that Blender's
+  `gpu.types.GPUShader` compiled into.  That interop has no Metal equivalent.
+* **Blender's own `gpu` module cannot host the upstream design either.**
+  Checked on 5.1: `gpu.compute.dispatch` exists and `GPUShaderCreateInfo`
+  offers `compute_source`, `image`, `uniform_buf`, `push_constant`, but there
+  is **no storage-buffer binding** (`storage_buf`) in the Python API, so the
+  atomic-append marching cubes (`atomicAdd(count)`, `triangles[index] = ...`)
+  cannot be expressed.  Only image outputs would be possible, which would
+  still leave the triangle extraction to the CPU.
+
+Because of the three points above, "port the engine as is" is impossible on
+the target hardware; the evaluation pipeline had to be replaced.
+
+### 2.2 Blender API changes that would have needed patching anyway
+
+* `bpy.app.binary_path_python` (used by `util/pymodule.py`) was removed in
+  Blender 2.91; `sys.executable` is the replacement.
+* Absolute imports (`from mesh_from_sdf.raymarching import *`) break under
+  the extension system, where the package is `bl_ext.<repo>.<id>`.  The port
+  uses relative imports everywhere.
+* `bl_info` add-ons are legacy; the port ships a `blender_manifest.toml`
+  extension (`blender_version_min = "5.0.0"`, MIT license, no wheels).
+* `gpu.types.GPUShader(vertexcode, fragcode)` legacy strings with raw
+  `uniform`/`in`/`out` declarations and `#version` lines are not accepted by
+  the 5.x create-info pipeline on Metal; `bgl` was removed in 5.0.
+* Blender 5.2 changed Geometry Nodes modifier input access
+  (`modifier["socket"]` -> `modifier.properties.inputs...`) and the socket
+  identifiers of the Compare / Random Value nodes.  The port deliberately
+  uses neither: all values live in nodes inside the tree, and comparisons use
+  Math nodes (`LESS_THAN`), so the same code runs on 5.0, 5.1 and 5.2.
+* `UILayout.template_list(columns=...)` is deprecated in 5.1; not used.
+
+## 3. The replacement: Geometry Nodes as the SDF engine
+
+Blender 5.0 promoted the volume-grid nodes out of experimental
+("Volume grids can now be processed directly with the new grid socket").
+The port compiles the fusion into one Geometry Nodes tree per fusion object:
+
+```
+for each shape (list order):
+  Object Info (Relative) -> Separate Transform -> Combine Transform (scale 1,1,1)
+      -> Invert Matrix -> Transform Point(Position)      # rigid inverse
+      -> "SDFF <Primitive>" group (Position, Scale, Rounding, Param) -> Distance
+  "SDFF Op <Operation> <BlendType>" group (Distance, Accumulated, Blend, Steps)
+Join Geometry(proxy meshes) -> Bounding Box -> padded Min/Max, cubic voxels
+Volume Cube (Density = -distance, Background -1) -> Get Named Grid("density")
+  -> Grid to Mesh (Threshold 0, Adaptivity) -> Set Shade Smooth -> Output
+```
+
+Why this satisfies the brief:
+
+* **Live, non-destructive:** the Object Info nodes make the tree depend on
+  the source objects, so moving, rotating or scaling a shape re-evaluates
+  the mesh through the depsgraph, with no Python handler in the loop.
+* **Cross-platform:** no GPU API is touched.  Field evaluation is
+  multithreaded C++ and meshing is OpenVDB, on Metal, Vulkan or OpenGL alike.
+* **Preview vs final:** a single `RESOLUTION` integer node; the presets
+  Low/Medium/High map to 32/64/128 voxels along the longest axis and
+  *Convert to Mesh* temporarily raises it to *Final Resolution*.
+  Measured on the M5 for box + sphere (smooth union): 64 -> 2 ms,
+  128 -> 8 ms, 192 -> 22 ms, 256 -> 53 ms per evaluation, so no throttling
+  was necessary; *Live Update* can still pause the modifier.
+* **Same maths:** every primitive/operator group reproduces the upstream GLSL
+  formula.  `tests/run_tests.py` samples the node field on thousands of
+  random points and compares against `sdf_ref.py` (max error ~2e-6).
+
+Deviations from upstream, on purpose:
+
+* Z is the height axis of cylinders and cones (Blender is Z-up; upstream was
+  Y-up from GLSL conventions).
+* Sizes come from the object's *scale* instead of separate width/height
+  properties, so the normal transform tools and gizmos edit them.  Boxes and
+  cylinder heights are exact under non-uniform scale; spheres, torus and cone
+  radii use the normalised-space approximation (exact for uniform XY scale).
+* Upstream scaled the round/chamfer *intersection* result by 0.5; the port
+  keeps the true hg_sdf formulas so distances stay metric.
+* Blend, blend type, steps and resolution live on the fusion (one slider
+  for the whole model, like Spline's Shape Blend); a per-shape
+  *Custom Blend* override keeps upstream's per-object flexibility.
+* Deleting a shape object with X is enough; a depsgraph handler prunes it.
+
+## 4. Verified
+
+* `tests/run_tests.py` on Blender 5.1.0 / macOS 26 / Apple M5: 65 checks,
+  all passing (primitive maths, all 15 operation x blend combinations,
+  the Phase 1 acceptance flow, analytic volumes of each primitive, timings).
+* `blender --command extension build` / `validate` succeed, and the ZIP
+  installs/enables/disables cleanly through the extension system
+  (`bl_ext.user_default.sdf_fusion`).
+* `tests/gui_smoke.py` drove the installed extension in a real Blender 5.1
+  window (Metal backend): panel drawn, shapes added through the operators,
+  blend / blend type / subtract changed live, Convert to Mesh produced a
+  68k-face mesh without modifiers.  Screenshots: `docs/ui_*.png`.
+* Workbench render of several fusions (`docs/preview.png`).
+
+## 5. Known limitations / future work
+
+* Duplicating a fusion object with Shift+D duplicates the modifier but the
+  copy still points at the original shapes; use *New Fusion* and add shapes
+  instead (a "duplicate fusion" operator is easy to add later).
+* No per-parameter gizmos (upstream had arrow gizmos); scale handles cover
+  the common cases.
+* Only Box / Sphere / Cylinder / Torus / Cone.  Upstream's pyramid,
+  truncated pyramid, hex/ngon prism, quadratic Bezier and GLSL-file
+  primitives can be added as further node groups from `shader/common.py`.
+* Materials: the fused mesh has no UVs (marching-cubes style output).
+* Native SDF-grid alternative: Blender 5 also has *Mesh to SDF Grid* and
+  *SDF Grid Boolean* nodes.  They were not used because they only offer hard
+  booleans and would sample the proxy meshes; the analytic field gives exact
+  smooth blends and needs no voxelisation of the sources.  The tree could
+  still be extended with *SDF Grid Fillet* / *Offset* as post-processing.

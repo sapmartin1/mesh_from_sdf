@@ -1,7 +1,0 @@
-vec3 p = samplpos;
-vec2 c = vec2(3,4)/5;
-float ra = 2.5;
-vec2 q = vec2( length(p.xz), p.y );
-float l = length(q) - ra;
-float m = length(q - c*clamp(dot(q,c),0.0,ra) );
-dist = max(l,m*sign(c.y*q.x-c.x*q.y));
