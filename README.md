@@ -27,7 +27,7 @@ Blender evaluates natively on every platform.  See
 
 ## Installation
 
-1. Download `sdf_fusion-1.4.0.zip` (or build it, see below).
+1. Download `sdf_fusion-1.4.1.zip` (or build it, see below).
 2. Drag and drop the ZIP into a Blender window, or use
    *Edit > Preferences > Get Extensions > (dropdown) > Install from Disk...*
 3. Enable **SDF Fusion** if it is not enabled automatically.
@@ -53,7 +53,7 @@ SDF Fusion
     Primitive      Box / Sphere / Cylinder / Torus / Cone / Capsule / Pyramid / Prism
     Operation      Union | Subtract | Intersect
     Radius         how far this shape's blend reaches
-    Blend          how full the blend ramp is
+    Blend          how much the ramp fills in (1 = full quarter-pipe)
     Color          shape colour (see Materials)
     Size           X / Y / Z in scene units (edits the object scale)
     Sides          (prism)   Round Edges (box, cylinder, prism)
@@ -63,7 +63,7 @@ SDF Fusion
   <fusion>
     Radius x       master multiplier for every shape's Radius
     Blend x        master multiplier for every shape's Blend
-    Blend Mode     Ramp / Steps
+    Blend Mode     Ramp / Steps / Flat Bevel
     Quality        Low / Medium / High / Custom     (preview resolution)
     Adaptivity     merge flat areas
     Live Update    pause the live mesh on heavy scenes
@@ -82,15 +82,20 @@ SDF Fusion
    **Sphere**, and drag the sphere so it overlaps the box.
 3. With a shape selected, drag its **Radius** and **Blend**: the shapes melt
    into each other.  *Radius* sets how far from the seam the blend reaches
-   along and into the neighbouring surfaces.  *Blend* sets how full the ramp
-   is: low values hug the inner corner, 0.5 is a circular quarter-pipe, 1.0 is
-   a flat bevel.  The ramp is always concave and tangent to both surfaces, so
-   a small Radius with a high Blend reads as a tight bevel and a large Radius
-   with a low Blend as a long, gentle lean.  Every shape has its own values;
-   **Radius x** and **Blend x** on the fusion scale all of them at once
-   (Radius x = 0 gives hard booleans).  Where two shapes meet, the sharper
-   setting wins by default, so one delicate shape can be tuned without
-   touching the rest (*Seams* in the *Shapes* sub-panel).
+   along and into the neighbouring surfaces.  *Blend* sets how much the ramp
+   fills in: 1.0 is a full circular quarter-pipe, lower values hug the inner
+   corner, 0 is a sharp seam.  The ramp always curves inward and leaves both
+   surfaces tangentially, so it never looks like it bulges; the quarter-pipe
+   is the fullest it gets.  A small Radius with full Blend reads as a tight
+   rounded bevel, a large Radius with a low Blend as a long, gentle lean.
+   Every shape has its own values; **Radius x** and **Blend x** on the fusion
+   scale all of them at once (Radius x = 0 gives hard booleans).  Where two
+   shapes meet, the sharper setting wins by default, so one delicate shape
+   can be tuned without touching the rest (*Seams* in the *Shapes*
+   sub-panel).  *Blend Mode* also offers *Steps* and an explicit *Flat Bevel*.
+
+   In the picture: columns are Radius 0.15 / 0.45 / 0.9, rows are Blend
+   0.33 / 0.66 / 1.0.
 
    ![Radius and Blend](docs/blend_family.png)
 

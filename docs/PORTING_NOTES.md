@@ -171,14 +171,20 @@ Deviations from upstream, on purpose:
   material it adds.  Both are now **per shape**: *Radius* (reach) and *Blend*
   (fill, 0..1), with master multipliers on the fusion.
 * Smooth / Round / Chamfer are replaced by one family, a p-norm
-  generalisation of upstream's `opRoundUnion` with `p = 1 / Blend`:
-  `max(r, min(d0, d1)) - (u^p + v^p)^(1/p)`.  Blend 0.5 is exactly upstream's
-  round union, Blend 1.0 has exactly the chamfer's surface, Blend -> 0 is the
-  hard boolean.  For every `p >= 1` the fillet is concave, tangent to both
-  surfaces and bounded by Radius and by the flat bevel, so it can never
-  overshoot (an early two-parameter polynomial prototype did, which is why it
-  was rejected).  The p-norm is normalised by the larger term so high
-  exponents cannot overflow in single precision.  Steps stays as a mode.
+  generalisation of upstream's `opRoundUnion`:
+  `max(r, min(d0, d1)) - (u^p + v^p)^(1/p)` with `p >= 2`.  `p = 2` is exactly
+  upstream's round union (a circular quarter-pipe) and is the fullest the ramp
+  gets; `p -> inf` is the hard boolean.  *Blend* is the depth of the fill at
+  the seam relative to the quarter-pipe, `p = ln 2 / -ln(1 - (1 - 1/sqrt 2) t)`,
+  so the slider is linear in "amount".  The fillet is concave, tangent to both
+  surfaces and bounded by Radius.  The p-norm is normalised by the larger term
+  so high exponents cannot overflow in single precision.
+  Two earlier attempts were rejected in review: a two-parameter polynomial
+  (overshoots into ledges), and letting the family run on to `p = 1` (1.4.0):
+  a nearly straight profile revolved around a round shape becomes a cone-like
+  skirt that reads as bulging outward in 3D even though its 2D section is
+  harmless.  The straight bevel survives only as the explicit *Flat Bevel*
+  mode; *Steps* stays as a mode too.
 * Radius and Blend travel with the field as a vector that is mixed like the
   colours, so every seam sees the settings of both shapes meeting there.  The
   *Seams* rule combines them: **Sharper Wins** (default, makes blending a true
@@ -190,13 +196,14 @@ Deviations from upstream, on purpose:
   their local matrix after a view-layer update; covered by placement tests.
 * Fusions saved by older versions are migrated on load (and on the first
   depsgraph update after an upgrade): the old Blend distance becomes each
-  shape's Radius, Smooth/Round -> Blend 0.5, Chamfer -> 1.0, None -> Radius 0;
+  shape's Radius with full Blend, Chamfer -> Flat Bevel mode, None -> Radius 0
+  (1.4.0 fusions get their Blend remapped onto the new range);
   fusions that used per-shape overrides keep the old seam rule so they look
   the same.
 
 ## 4. Verified
 
-* `tests/run_tests.py` on Blender 5.1.0 / macOS 26 / Apple M5: 157 checks,
+* `tests/run_tests.py` on Blender 5.1.0 / macOS 26 / Apple M5: 169 checks,
   all passing (primitive maths for all 8 primitives, all 15 operation x
   blend combinations, the Phase 1 acceptance flow, analytic volumes, colour
   and material blending, animation drivers, Apply Transform repair,

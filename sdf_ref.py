@@ -268,39 +268,56 @@ def op_stairs_intersection(d0, d1, s, n):
 EPS_BLEND = 1e-4
 MIN_FILL = 0.02
 OPERATIONS = ('UNION', 'SUBTRACT', 'INTERSECT')
-MODES = ('RAMP', 'STEPS')
+MODES = ('RAMP', 'STEPS', 'CHAMFER')
+RAMP_K = 1.0 - 1.0 / np.sqrt(2.0)          # seam depth of a unit quarter-pipe
+LN2 = float(np.log(2.0))
 SEAM_RULES = ('SHARPER', 'AVERAGE', 'SOFTER', 'LATEST')
 
 
 # ----------------------------------------------------------------------------
-# ramp family: p-norm generalisation of the round operators, p = 1 / fill.
-# fill 0.5 -> circular quarter-pipe, 1 -> flat bevel, -> 0 hard boolean.
+# ramp family: p-norm generalisation of the round operators with p >= 2.
+# fill 1 -> circular quarter-pipe (the fullest), fill -> 0 -> hard boolean;
+# fill is the seam depth relative to the quarter-pipe, so the ramp always
+# curves inward.  p = 1 (flat bevel) is only used by the CHAMFER mode.
 # ----------------------------------------------------------------------------
+
+def fill_to_p(t):
+    return -LN2 / np.log(1.0 - RAMP_K * t)
+
 
 def _lp(u, v, p):
     m = np.maximum(np.maximum(u, v), 1e-9)
     return m * np.power(np.power(u / m, p) + np.power(v / m, p), 1.0 / p)
 
 
-def op_ramp_union(d0, d1, r, t):
-    p = 1.0 / t
+def _ramp_union(d0, d1, r, p):
     u = np.maximum(r - d0, 0.0)
     v = np.maximum(r - d1, 0.0)
     return np.maximum(r, np.minimum(d0, d1)) - _lp(u, v, p)
 
 
-def op_ramp_difference(d0, d1, r, t):
-    p = 1.0 / t
+def _ramp_difference(d0, d1, r, p):
     u = np.maximum(r - d0, 0.0)
     v = np.maximum(r + d1, 0.0)
     return np.minimum(-r, np.maximum(-d0, d1)) + _lp(u, v, p)
 
 
-def op_ramp_intersection(d0, d1, r, t):
-    p = 1.0 / t
+def _ramp_intersection(d0, d1, r, p):
     u = np.maximum(r + d0, 0.0)
     v = np.maximum(r + d1, 0.0)
     return np.minimum(-r, np.maximum(d0, d1)) + _lp(u, v, p)
+
+
+def op_ramp_union(d0, d1, r, t):
+    return _ramp_union(d0, d1, r, fill_to_p(t))
+
+
+def op_ramp_difference(d0, d1, r, t):
+    return _ramp_difference(d0, d1, r, fill_to_p(t))
+
+
+def op_ramp_intersection(d0, d1, r, t):
+    return _ramp_intersection(d0, d1, r, fill_to_p(t))
 
 
 def seam(rule, new, acc):
@@ -330,6 +347,12 @@ def combine(d_new, d_acc, operation, mode, r, t, steps=1):
         if operation == 'SUBTRACT':
             return op_ramp_difference(d_new, d_acc, r, t)
         return op_ramp_intersection(d_new, d_acc, r, t)
+    if mode == 'CHAMFER':
+        if operation == 'UNION':
+            return _ramp_union(d_new, d_acc, r, 1.0)
+        if operation == 'SUBTRACT':
+            return _ramp_difference(d_new, d_acc, r, 1.0)
+        return _ramp_intersection(d_new, d_acc, r, 1.0)
     if mode == 'STEPS':
         n = float(max(1, int(steps)))
         if operation == 'UNION':

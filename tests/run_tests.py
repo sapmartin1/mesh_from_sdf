@@ -138,7 +138,7 @@ def fusion_params(fusion):
             'radius_scale': fs.radius_scale, 'fill_scale': fs.fill_scale}
 
 
-def set_blend(fusion, radius, fill=0.5):
+def set_blend(fusion, radius, fill=1.0):
     """Give every shape of the fusion the same Radius / Blend."""
     for ref in fusion.sdf_fusion.shapes:
         if ref.object is not None:
@@ -246,7 +246,7 @@ def test_field_matches_reference():
     fs['steps'] = 3
     for op in nodes.OPERATIONS:
         for mode in nodes.MODES:
-            for fill in ((0.02, 0.5, 1.0) if mode == 'RAMP' else (0.5,)):
+            for fill in ((0.02, 0.5, 1.0) if mode == 'RAMP' else (1.0,)):
                 b.sdf_shape['operation'] = list(nodes.OPERATIONS).index(op)
                 fs['mode'] = mode_ids[mode]
                 for sh in (a, b):
@@ -261,13 +261,18 @@ def test_field_matches_reference():
     # the ramp reproduces upstream's round operators at Blend 0.5 and the chamfer surface at 1.0
     d0 = np.array([rng.uniform(-1, 1) for _ in range(2000)])
     d1 = np.array([rng.uniform(-1, 1) for _ in range(2000)])
-    check(np.allclose(sdf_ref.op_ramp_union(d0, d1, 0.3, 0.5), sdf_ref.op_round_union(d0, d1, 0.3), atol=1e-9)
-          and np.allclose(sdf_ref.op_ramp_intersection(d0, d1, 0.3, 0.5), sdf_ref.op_round_intersection(d0, d1, 0.3), atol=1e-9)
-          and np.allclose(sdf_ref.op_ramp_difference(d0, d1, 0.3, 0.5), sdf_ref.op_round_difference(d0, d1, 0.3), atol=1e-9),
-          "ramp at Blend 0.5 equals upstream's round union / intersection / difference")
-    ramp1 = sdf_ref.op_ramp_union(d0, d1, 0.3, 1.0)
+    check(np.allclose(sdf_ref.op_ramp_union(d0, d1, 0.3, 1.0), sdf_ref.op_round_union(d0, d1, 0.3), atol=1e-9)
+          and np.allclose(sdf_ref.op_ramp_intersection(d0, d1, 0.3, 1.0), sdf_ref.op_round_intersection(d0, d1, 0.3), atol=1e-9)
+          and np.allclose(sdf_ref.op_ramp_difference(d0, d1, 0.3, 1.0), sdf_ref.op_round_difference(d0, d1, 0.3), atol=1e-9),
+          "ramp at Blend 1.0 equals upstream's round union / intersection / difference")
+    flat = sdf_ref.combine(d0, d1, 'UNION', 'CHAMFER', 0.3, 1.0)
     chamf = sdf_ref.op_chamfer_union(d0, d1, 0.3)
-    check(np.all((ramp1 < 0) == (chamf < 0)), "ramp at Blend 1.0 has the same surface as upstream's chamfer union")
+    check(np.all((flat < 0) == (chamf < 0)), "Flat Bevel mode has the same surface as upstream's chamfer union")
+    # Blend is linear in the depth of the fill at the seam, relative to the quarter-pipe
+    for fill in (0.25, 0.5, 0.75, 1.0):
+        p = sdf_ref.fill_to_p(fill)
+        depth = 1.0 - 2.0 ** (-1.0 / p)            # seam depth of the unit ramp
+        check(abs(depth - fill * sdf_ref.RAMP_K) < 1e-9 and p >= 2.0 - 1e-9, f"Blend {fill:.2f}: seam depth is {fill:.2f} x quarter-pipe (p = {p:.2f} >= 2)")
 
 
 # ----------------------------------------------------------------------------
@@ -670,8 +675,8 @@ def test_ramp_family():
     sph.scale = (0.8, 0.8, 0.8)
     fs = fusion.sdf_fusion
     fs.quality = 'HIGH'
-    check(abs(box.sdf_shape.radius - 0.25) < 1e-6 and abs(box.sdf_shape.fill - 0.5) < 1e-6 and fs.mode == 'RAMP' and fs.seam_rule == 'SHARPER',
-          "new shapes start with Radius 0.25 / Blend 0.5, ramp mode, sharper-wins seams")
+    check(abs(box.sdf_shape.radius - 0.25) < 1e-6 and abs(box.sdf_shape.fill - 1.0) < 1e-6 and fs.mode == 'RAMP' and fs.seam_rule == 'SHARPER',
+          "new shapes start with Radius 0.25 / Blend 1.0 (full quarter-pipe), ramp mode, sharper-wins seams")
 
     def vol():
         return mesh_stats(evaluated_mesh(fusion))['volume']
@@ -681,24 +686,24 @@ def test_ramp_family():
     for fill in (0.05, 0.25, 0.5, 0.75, 1.0):
         set_blend(fusion, 0.6, fill)
         vols.append(vol())
-    check(all(b_ > a_ + 1e-3 for a_, b_ in zip(vols, vols[1:])) and vols[0] > hard - 1e-3,
+    check(all(b_ > a_ + 1e-3 for a_, b_ in zip(vols, vols[1:])) and vols[0] > hard - 0.02,
           "Blend (fill) adds material monotonically: " + " < ".join(f"{v:.3f}" for v in vols))
     rv = []
     for radius in (0.1, 0.3, 0.6, 0.9):
-        set_blend(fusion, radius, 0.5)
+        set_blend(fusion, radius, 1.0)
         rv.append(vol())
     check(all(b_ > a_ + 1e-3 for a_, b_ in zip(rv, rv[1:])), "Radius adds material monotonically: " + " < ".join(f"{v:.3f}" for v in rv))
-    set_blend(fusion, 0.6, 0.5)
+    set_blend(fusion, 0.6, 1.0)
     fs.radius_scale = 0.0
     check(abs(vol() - hard) < 2e-3, "Radius multiplier 0 gives the hard boolean")
     fs.radius_scale = 0.5
     half = vol()
-    set_blend(fusion, 0.3, 0.5)
+    set_blend(fusion, 0.3, 1.0)
     fs.radius_scale = 1.0
     check(abs(vol() - half) < 1e-4, "Radius multiplier scales every shape's Radius")
 
     # the ramp is bounded: it never reaches further than Radius and never beyond the flat bevel
-    for fill in (0.2, 0.5, 1.0):
+    for fill in (0.3, 0.6, 1.0):
         set_blend(fusion, 0.6, fill)
         me = evaluated_mesh(fusion)
         co = np.array([v.co[:] for v in me.vertices])
@@ -708,8 +713,11 @@ def test_ramp_family():
         d_sph = sdf_ref.primitive_distance('SPHERE', (hom @ shapes[1]['matrix_inv_rigid'].T)[:, :3], shapes[1]['scale'])
         fil = (d_box > 0.02) & (d_sph > 0.02)
         tol = 0.03
-        ok = fil.sum() > 10 and d_box[fil].max() < 0.6 + tol and d_sph[fil].max() < 0.6 + tol and (d_box[fil] + d_sph[fil]).max() < 0.6 + tol
-        check(ok, f"Blend {fill:.1f}: fillet stays within Radius and inside the flat bevel ({int(fil.sum())} fillet verts)")
+        # never further than Radius, and never fuller than the circular quarter-pipe:
+        # (r - d0)^2 + (r - d1)^2 >= r^2 on the surface  <=>  the ramp always curves inward
+        circ = np.sqrt((0.6 - d_box[fil]) ** 2 + (0.6 - d_sph[fil]) ** 2)
+        ok = fil.sum() > 10 and d_box[fil].max() < 0.6 + tol and d_sph[fil].max() < 0.6 + tol and circ.min() > 0.6 - tol
+        check(ok, f"Blend {fill:.1f}: ramp stays within Radius and never fuller than the quarter-pipe ({int(fil.sum())} fillet verts, min {circ.min():.3f} >= 0.6)")
 
     # per-object blending: a delicate knob keeps tight seams whatever its neighbours use
     knob = ops.add_shape(C, fusion, 'SPHERE', Vector((-0.55, 0.0, 1.05)))
@@ -768,10 +776,20 @@ def test_ramp_family():
     for sh in (a, b, c):
         sh.sdf_shape['radius'] = 9.0            # junk that the migration must overwrite
     check(ops.migrate_fusion(fusion), "legacy fusion detected and migrated")
-    check(abs(a.sdf_shape.radius - 0.4) < 1e-6 and abs(a.sdf_shape.fill - 1.0) < 1e-6, "global Chamfer 0.4 -> Radius 0.4, Blend 1.0")
-    check(b.sdf_shape.radius == 0.0 and abs(c.sdf_shape.radius - 0.15) < 1e-6 and abs(c.sdf_shape.fill - 0.5) < 1e-6, "per-shape overrides -> None = Radius 0, Smooth 0.15 = Radius 0.15 / Blend 0.5")
-    check(fs.seam_rule == 'LATEST' and fs.data_version == ops.DATA_VERSION and fs.mode == 'RAMP', "overrides keep the old seam behaviour; version stamped")
+    check(abs(a.sdf_shape.radius - 0.4) < 1e-6 and abs(a.sdf_shape.fill - 1.0) < 1e-6 and fs.mode == 'CHAMFER', "global Chamfer 0.4 -> Radius 0.4 in Flat Bevel mode")
+    check(b.sdf_shape.radius == 0.0 and abs(c.sdf_shape.radius - 0.15) < 1e-6 and abs(c.sdf_shape.fill - 1.0) < 1e-6, "per-shape overrides -> None = Radius 0, Smooth 0.15 = Radius 0.15 / full Blend")
+    check(fs.seam_rule == 'LATEST' and fs.data_version == ops.DATA_VERSION, "overrides keep the old seam behaviour; version stamped")
     check(not ops.migrate_fusion(fusion), "migration runs only once")
+    # 1.4.0 fusions: fill 0.5 was the quarter-pipe, 1.0 the flat bevel
+    fs['data_version'] = 2
+    fs['mode'] = 0
+    a.sdf_shape['fill'] = 0.5
+    b.sdf_shape['fill'] = 0.9
+    c.sdf_shape['fill'] = 0.25
+    p_old = 1.0 / 0.25
+    check(ops.migrate_fusion(fusion) and abs(a.sdf_shape.fill - 1.0) < 1e-6 and abs(b.sdf_shape.fill - 1.0) < 1e-6
+          and abs(sdf_ref.fill_to_p(c.sdf_shape.fill) - p_old) < 1e-6,
+          f"1.4.0 fills remapped: quarter-pipe and flatter -> 1.0, 0.25 keeps its curve (now {c.sdf_shape.fill:.3f})")
     check(mesh_stats(evaluated_mesh(fusion))['verts'] > 0, "migrated fusion evaluates")
 
 

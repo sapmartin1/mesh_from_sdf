@@ -351,8 +351,8 @@ def shape_material_color(shape):
     return (c[0], c[1], c[2], 1.0)
 
 
-DATA_VERSION = 2
-_LEGACY_FILL = {'SMOOTH': 0.5, 'ROUND': 0.5, 'CHAMFER': 1.0, 'STEPS': 0.5, 'NONE': 0.5}
+DATA_VERSION = 3
+_RAMP_K = 1.0 - 1.0 / math.sqrt(2.0)
 
 
 def migrate_fusion(fusion):
@@ -361,6 +361,18 @@ def migrate_fusion(fusion):
     fs = fusion.sdf_fusion
     if fs.data_version >= DATA_VERSION:
         return False
+    if fs.data_version == 2:
+        # 1.4.0 stored fill with 0.5 = quarter-pipe and 1.0 = flat bevel; the ramp
+        # now ends at the quarter-pipe (fill 1.0).  Keep the same curve where one exists.
+        for ref in fs.shapes:
+            sh = ref.object
+            if sh is None:
+                continue
+            old = max(0.0, min(1.0, sh.sdf_shape.fill))
+            sh.sdf_shape['fill'] = 1.0 if old >= 0.5 else (1.0 - 2.0 ** (-old)) / _RAMP_K
+        fs['data_version'] = DATA_VERSION
+        nodes.rebuild(fusion)
+        return True
     any_custom = False
     for ref in fs.shapes:
         sh = ref.object
@@ -373,8 +385,8 @@ def migrate_fusion(fusion):
         else:
             k, bt = fs.blend, fs.blend_type
         st['radius'] = 0.0 if bt == 'NONE' else float(k)
-        st['fill'] = _LEGACY_FILL.get(bt, 0.5)
-    fs['mode'] = 1 if fs.blend_type == 'STEPS' else 0
+        st['fill'] = 1.0
+    fs['mode'] = {'STEPS': 1, 'CHAMFER': 2}.get(fs.blend_type, 0)
     fs['seam_rule'] = 3 if any_custom else 0       # keep the old look when overrides were used
     fs['radius_scale'] = 1.0
     fs['fill_scale'] = 1.0

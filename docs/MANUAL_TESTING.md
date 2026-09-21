@@ -72,9 +72,10 @@ on your M5 Mac with Blender 5.2 and note anything that misbehaves.
 ## 1.4 additions
 
 - [ ] Select a shape: **Radius** and **Blend** sliders sit right under the
-      operation buttons.  Small Radius + Blend 1.0 looks like a tight bevel;
-      large Radius + Blend 0.2 is a long gentle lean; Blend 0.5 is a
-      quarter-pipe.  The ramp never bulges outward.
+      operation buttons.  Blend 1.0 is a full quarter-pipe; lower values hug
+      the inner corner.  Small Radius + full Blend looks like a tight rounded
+      bevel; large Radius + low Blend is a long gentle lean.  Around a sphere
+      the blend is always a waisted neck, never a cone-like skirt.
 - [ ] Four shapes, one delicate: lower only its Radius; its seams tighten,
       all other seams stay as they were, whatever its position in the list.
 - [ ] Drag **Radius x** on the fusion from 0 to 2: everything melts

@@ -21,7 +21,7 @@ upstream GLSL library (see ``sdf_ref.py`` for the readable reference).
 
 import bpy
 
-GROUP_VERSION = 4
+GROUP_VERSION = 5
 COLOR_ATTRIBUTE = "Color"
 SURFACE_ATTRIBUTE = "SDF Surface"     # (metallic, roughness, transmission)
 EXTRA_ATTRIBUTE = "SDF Extra"         # (ior, emission strength, 0)
@@ -408,12 +408,17 @@ def primitive_group(primitive):
 #
 # RAMP mode is a p-norm generalisation of hg_sdf's round union (upstream
 # ``opRoundUnion``):   u = max(r - d0, 0),  v = max(r - d1, 0)
-#     union = max(r, min(d0, d1)) - (u^p + v^p)^(1/p),      p = 1 / fill
-# fill 0.5 (p = 2) is the circular quarter-pipe, fill 1 (p = 1) the flat bevel,
-# fill -> 0 (p -> inf) the hard boolean.  For every p >= 1 the fillet is
-# concave, leaves both surfaces tangentially and starts exactly ``r`` from the
-# seam, so Radius (reach) and Blend (fill) are independent and can never
-# overshoot.  STEPS keeps upstream's opStairsUnion with the radius as its size.
+#     union = max(r, min(d0, d1)) - (u^p + v^p)^(1/p),      p >= 2
+# p = 2 is the circular quarter-pipe and the FULLEST the ramp ever gets;
+# p -> inf is the hard boolean.  Blend (fill, 0..1) is the depth of the fill
+# at the seam relative to that quarter-pipe, which gives
+#     p = ln 2 / -ln(1 - (1 - 1/sqrt 2) * fill).
+# The ramp therefore always curves inward, leaves both surfaces tangentially
+# and starts exactly ``r`` from the seam: Radius (reach) and Blend (amount) are
+# independent and the blend can never look like it bulges.  (Profiles flatter
+# than the circle, 1 <= p < 2, turn into cone-like skirts around round shapes
+# in 3D and were rejected in review.)  CHAMFER is the explicit flat bevel
+# (p = 1); STEPS keeps upstream's opStairsUnion with the radius as its size.
 #
 # Radius and fill are per shape.  They travel with the field as a vector
 # (radius, fill, 0) that is mixed like the colours, so at every seam the op
@@ -421,7 +426,9 @@ def primitive_group(primitive):
 # accumulated result there; the seam rule decides how the two combine.
 # ----------------------------------------------------------------------------
 
-MODES = ('RAMP', 'STEPS')
+MODES = ('RAMP', 'STEPS', 'CHAMFER')
+RAMP_K = 1.0 - 0.7071067811865476        # seam depth of a unit quarter-pipe
+LN2 = 0.6931471805599453
 SEAM_RULES = ('SHARPER', 'AVERAGE', 'SOFTER', 'LATEST')
 MIN_FILL = 0.02
 
@@ -480,15 +487,21 @@ def _build_op(name, operation, mode, rule):
     b.link(b.mix_vector(gi.outputs['Accumulated Extra'], gi.outputs['Extra'], hc), go.inputs['Result Extra'])
     b.link(b.mix_color(gi.outputs['Accumulated Emission'], gi.outputs['Emission'], hc), go.inputs['Result Emission'])
 
-    if mode == 'RAMP':
-        p = b.math('DIVIDE', 1.0, t)
+    if mode in ('RAMP', 'CHAMFER'):
+        if mode == 'RAMP':
+            ln_inner = b.math('LOGARITHM', b.math('SUBTRACT', 1.0, b.math('MULTIPLY', t, RAMP_K)), 2.718281828459045)
+            p = b.math('DIVIDE', -LN2, ln_inner)
+            inv_p = b.math('DIVIDE', ln_inner, -LN2)
 
-        def lp(u, v):
-            # p-norm of (u, v), normalised by the larger one so u^p never overflows
-            m = b.math('MAXIMUM', b.math('MAXIMUM', u, v), 1e-9)
-            s = b.math('ADD', b.math('POWER', b.math('DIVIDE', u, m), p),
-                       b.math('POWER', b.math('DIVIDE', v, m), p))
-            return b.math('MULTIPLY', m, b.math('POWER', s, t))
+            def lp(u, v):
+                # p-norm of (u, v), normalised by the larger one so u^p never overflows
+                m = b.math('MAXIMUM', b.math('MAXIMUM', u, v), 1e-9)
+                s = b.math('ADD', b.math('POWER', b.math('DIVIDE', u, m), p),
+                           b.math('POWER', b.math('DIVIDE', v, m), p))
+                return b.math('MULTIPLY', m, b.math('POWER', s, inv_p))
+        else:
+            def lp(u, v):
+                return b.math('ADD', u, v)
         if operation == 'UNION':
             u = b.math('MAXIMUM', b.math('SUBTRACT', r, d0), 0.0)
             v = b.math('MAXIMUM', b.math('SUBTRACT', r, d1), 0.0)

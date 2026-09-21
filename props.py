@@ -34,8 +34,9 @@ BLEND_ITEMS = (
 )
 
 MODE_ITEMS = (
-    ('RAMP', 'Ramp', 'Concave ramp between the shapes; Radius sets its reach, Blend how full it is', 0),
+    ('RAMP', 'Ramp', 'Concave ramp between the shapes; Radius sets its reach, Blend how much it fills in', 0),
     ('STEPS', 'Steps', 'Stair-stepped transition of size Radius', 1),
+    ('CHAMFER', 'Flat Bevel', 'Straight bevel of size Radius (around round shapes this forms a cone-like skirt)', 2),
 )
 
 SEAM_ITEMS = (
@@ -178,9 +179,9 @@ class SDFShapeSettings(PropertyGroup):
         description="How far from the seam this shape's blend reaches along and into its neighbours",
         update=_shape_values)
     fill: FloatProperty(
-        name="Blend", default=0.5, min=0.0, max=1.0, subtype='FACTOR',
-        description="How full the blend ramp is: low hugs the inner corner, 0.5 is a circular "
-                    "quarter-pipe, 1.0 is a flat bevel",
+        name="Blend", default=1.0, min=0.0, max=1.0, subtype='FACTOR',
+        description="How much the blend ramp fills in: 1.0 is a full quarter-pipe, lower values "
+                    "hug the inner corner, 0 is a sharp seam. The ramp always curves inward",
         update=_shape_values)
     # --- legacy (pre 1.4) settings, only read once by the migration ---
     use_custom_blend: BoolProperty(default=False, options={'HIDDEN'})
