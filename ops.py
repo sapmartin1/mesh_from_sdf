@@ -351,6 +351,38 @@ def shape_material_color(shape):
     return (c[0], c[1], c[2], 1.0)
 
 
+DATA_VERSION = 2
+_LEGACY_FILL = {'SMOOTH': 0.5, 'ROUND': 0.5, 'CHAMFER': 1.0, 'STEPS': 0.5, 'NONE': 0.5}
+
+
+def migrate_fusion(fusion):
+    """Pre 1.4 fusions had one Blend distance and a blend type (optionally
+    overridden per shape).  Convert them to per-shape Radius / Blend."""
+    fs = fusion.sdf_fusion
+    if fs.data_version >= DATA_VERSION:
+        return False
+    any_custom = False
+    for ref in fs.shapes:
+        sh = ref.object
+        if sh is None:
+            continue
+        st = sh.sdf_shape
+        if st.use_custom_blend:
+            k, bt = st.blend, st.blend_type
+            any_custom = True
+        else:
+            k, bt = fs.blend, fs.blend_type
+        st['radius'] = 0.0 if bt == 'NONE' else float(k)
+        st['fill'] = _LEGACY_FILL.get(bt, 0.5)
+    fs['mode'] = 1 if fs.blend_type == 'STEPS' else 0
+    fs['seam_rule'] = 3 if any_custom else 0       # keep the old look when overrides were used
+    fs['radius_scale'] = 1.0
+    fs['fill_scale'] = 1.0
+    fs['data_version'] = DATA_VERSION
+    nodes.rebuild(fusion)
+    return True
+
+
 def create_fusion(context, location=None):
     scene = context.scene
     mesh = bpy.data.meshes.new("SDF Fusion")
@@ -359,6 +391,7 @@ def create_fusion(context, location=None):
     if location is not None:
         fusion.location = location
     fusion.sdf_fusion.enabled = True
+    fusion.sdf_fusion['data_version'] = DATA_VERSION
     scene.sdf_active_fusion = fusion
     nodes.rebuild(fusion)
     return fusion
@@ -379,9 +412,12 @@ def add_shape(context, fusion, primitive, location):
     shape.display_type = 'WIRE'
     shape.hide_render = True
     apply_guide_display(fusion, shape)
+    # The fusion may have been created a moment ago, so its world matrix can be
+    # stale; bring it up to date and place the shape through its local matrix.
+    context.view_layer.update()
     shape.parent = fusion
     shape.matrix_parent_inverse = Matrix.Identity(4)
-    shape.matrix_world = Matrix.Translation(Vector(location))
+    shape.matrix_basis = fusion.matrix_world.inverted() @ Matrix.Translation(Vector(location))
 
     ref = fusion.sdf_fusion.shapes.add()
     ref.object = shape

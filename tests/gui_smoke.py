@@ -3,7 +3,7 @@
 GUI smoke test: drives the *installed* SDF Fusion extension inside a real
 Blender window and saves screenshots of every step.
 
-    # install first:  blender -b --command extension install-file --repo user_default --enable dist/sdf_fusion-1.3.0.zip
+    # install first:  blender -b --command extension install-file --repo user_default --enable dist/sdf_fusion-1.4.0.zip
     blender -b --python-expr "import bpy; bpy.ops.wm.save_as_mainfile(filepath='/tmp/sdff.blend')"
     blender /tmp/sdff.blend --python tests/gui_smoke.py -- /tmp/sdff_shots
 
@@ -99,19 +99,19 @@ def steps():
         if i == 2:
             screenshot('gui_01_box_sphere_blend_0.25.png')
             fusion = bpy.context.active_object.sdf_shape.fusion
-            fusion.sdf_fusion.blend = 0.7
+            fusion.sdf_fusion.radius_scale = 2.5
             return 0.8
         if i == 3:
             screenshot('gui_02_smooth_blend_0.7.png')
             fusion = bpy.context.active_object.sdf_shape.fusion
-            fusion.sdf_fusion.blend_type = 'ROUND'
-            fusion.sdf_fusion.blend = 0.4
+            fusion.sdf_fusion.radius_scale = 1.6
+            fusion.sdf_fusion.fill_scale = 1.8
             return 0.8
         if i == 4:
             screenshot('gui_03_round_blend.png')
             fusion = bpy.context.active_object.sdf_shape.fusion
-            fusion.sdf_fusion.blend_type = 'SMOOTH'
-            fusion.sdf_fusion.blend = 0.5
+            fusion.sdf_fusion.radius_scale = 2.0
+            fusion.sdf_fusion.fill_scale = 1.0
             shapes = [r.object for r in fusion.sdf_fusion.shapes]
             shapes[0].sdf_shape.color = (0.95, 0.30, 0.20, 1.0)
             shapes[1].sdf_shape.color = (0.20, 0.45, 0.95, 1.0)

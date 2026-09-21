@@ -68,6 +68,9 @@ class SDFF_PT_main(Panel):
                 box.label(text="Carved out of the result", icon='SELECT_SUBTRACT')
             elif st.operation == 'INTERSECT':
                 box.label(text="Only the part inside this shape is kept", icon='SELECT_INTERSECT')
+            col = box.column(align=True)
+            col.prop(st, 'radius', slider=True)
+            col.prop(st, 'fill', slider=True)
             row = box.row(align=True)
             row.prop(st, 'color', text="Color")
             row.operator('sdf_fusion.color_from_material', text="", icon='MATERIAL')
@@ -82,14 +85,6 @@ class SDFF_PT_main(Panel):
                 box.prop(st, 'tube', slider=True)
             elif st.primitive == 'CONE':
                 box.prop(st, 'top_radius', slider=True)
-            row = box.row()
-            row.prop(st, 'use_custom_blend')
-            if st.use_custom_blend:
-                sub = box.column(align=True)
-                sub.prop(st, 'blend', slider=True)
-                sub.prop(st, 'blend_type', text="")
-                if st.blend_type == 'STEPS':
-                    sub.prop(st, 'steps')
 
         fs = fusion.sdf_fusion
         included = [r.object for r in fs.shapes if r.object is not None and r.object.sdf_shape.include]
@@ -109,9 +104,10 @@ class SDFF_PT_main(Panel):
         row.operator('sdf_fusion.select_fusion', text="", icon='RESTRICT_SELECT_OFF')
         row.operator('sdf_fusion.duplicate_fusion', text="", icon='DUPLICATE')
         col = box.column(align=True)
-        col.prop(fs, 'blend', slider=True)
-        col.prop(fs, 'blend_type', text="")
-        if fs.blend_type == 'STEPS':
+        col.prop(fs, 'radius_scale', slider=True)
+        col.prop(fs, 'fill_scale', slider=True)
+        col.prop(fs, 'mode', text="")
+        if fs.mode == 'STEPS':
             col.prop(fs, 'steps')
         col = box.column(align=True)
         col.prop(fs, 'quality', text="Quality")
@@ -197,6 +193,7 @@ class SDFF_PT_shapes(Panel):
         col.operator('sdf_fusion.remove_shape', text="", icon='X')
         col.separator()
         col.operator('sdf_fusion.rebuild', text="", icon='FILE_REFRESH')
+        layout.prop(fs, 'seam_rule')
         layout.prop(fs, 'auto_order')
         if fs.auto_order:
             layout.label(text="Unions first, then Subtract, then Intersect", icon='INFO')

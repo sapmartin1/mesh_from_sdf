@@ -30,6 +30,8 @@ def depsgraph_update_post(scene, depsgraph):
             fs = ob.sdf_fusion
             if not fs.enabled:
                 continue
+            if fs.data_version < ops.DATA_VERSION:
+                ops.migrate_fusion(ob)
             if ops.prune_fusion(ob) or nodes.tree_is_shared(ob):
                 nodes.rebuild(ob)
             else:
@@ -40,11 +42,26 @@ def depsgraph_update_post(scene, depsgraph):
         _busy = False
 
 
+@persistent
+def load_post(*_args):
+    """Upgrade fusions saved by older versions as soon as a file is opened."""
+    for ob in bpy.data.objects:
+        if ob.sdf_fusion.enabled and ob.sdf_fusion.data_version < ops.DATA_VERSION:
+            try:
+                ops.migrate_fusion(ob)
+            except Exception as exc:      # never block file loading
+                print("SDF Fusion: migration failed for", ob.name, exc)
+
+
 def register():
     if depsgraph_update_post not in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.append(depsgraph_update_post)
+    if load_post not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(load_post)
 
 
 def unregister():
+    if load_post in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(load_post)
     if depsgraph_update_post in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.remove(depsgraph_update_post)

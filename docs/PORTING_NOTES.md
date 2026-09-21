@@ -164,9 +164,39 @@ Deviations from upstream, on purpose:
   adopts shapes that are parented to a fusion but not listed; linked
   duplicates get their own proxy mesh).
 
+## 3d. 1.4.0: per-shape Radius / Blend and the ramp family (designed with Martin)
+
+* One fusion-wide Blend made multi-shape models hard to tune, and the single
+  smooth-min parameter mixed two things: how far a blend reaches and how much
+  material it adds.  Both are now **per shape**: *Radius* (reach) and *Blend*
+  (fill, 0..1), with master multipliers on the fusion.
+* Smooth / Round / Chamfer are replaced by one family, a p-norm
+  generalisation of upstream's `opRoundUnion` with `p = 1 / Blend`:
+  `max(r, min(d0, d1)) - (u^p + v^p)^(1/p)`.  Blend 0.5 is exactly upstream's
+  round union, Blend 1.0 has exactly the chamfer's surface, Blend -> 0 is the
+  hard boolean.  For every `p >= 1` the fillet is concave, tangent to both
+  surfaces and bounded by Radius and by the flat bevel, so it can never
+  overshoot (an early two-parameter polynomial prototype did, which is why it
+  was rejected).  The p-norm is normalised by the larger term so high
+  exponents cannot overflow in single precision.  Steps stays as a mode.
+* Radius and Blend travel with the field as a vector that is mixed like the
+  colours, so every seam sees the settings of both shapes meeting there.  The
+  *Seams* rule combines them: **Sharper Wins** (default, makes blending a true
+  per-object property independent of list order), Average, Softer Wins, or
+  Newer Shape (the pre 1.4 behaviour).
+* Bug fixed along the way: the first shape of a fusion created away from the
+  world origin landed at double the offset (its placement used the new
+  fusion's not-yet-evaluated world matrix).  Shapes are now placed through
+  their local matrix after a view-layer update; covered by placement tests.
+* Fusions saved by older versions are migrated on load (and on the first
+  depsgraph update after an upgrade): the old Blend distance becomes each
+  shape's Radius, Smooth/Round -> Blend 0.5, Chamfer -> 1.0, None -> Radius 0;
+  fusions that used per-shape overrides keep the old seam rule so they look
+  the same.
+
 ## 4. Verified
 
-* `tests/run_tests.py` on Blender 5.1.0 / macOS 26 / Apple M5: 129 checks,
+* `tests/run_tests.py` on Blender 5.1.0 / macOS 26 / Apple M5: 157 checks,
   all passing (primitive maths for all 8 primitives, all 15 operation x
   blend combinations, the Phase 1 acceptance flow, analytic volumes, colour
   and material blending, animation drivers, Apply Transform repair,

@@ -266,45 +266,78 @@ def op_stairs_intersection(d0, d1, s, n):
 
 
 EPS_BLEND = 1e-4
+MIN_FILL = 0.02
 OPERATIONS = ('UNION', 'SUBTRACT', 'INTERSECT')
-BLEND_TYPES = ('NONE', 'SMOOTH', 'ROUND', 'CHAMFER', 'STEPS')
+MODES = ('RAMP', 'STEPS')
+SEAM_RULES = ('SHARPER', 'AVERAGE', 'SOFTER', 'LATEST')
 
 
-def combine(d_new, d_acc, operation, blend_type='NONE', blend=0.0, steps=1):
+# ----------------------------------------------------------------------------
+# ramp family: p-norm generalisation of the round operators, p = 1 / fill.
+# fill 0.5 -> circular quarter-pipe, 1 -> flat bevel, -> 0 hard boolean.
+# ----------------------------------------------------------------------------
+
+def _lp(u, v, p):
+    m = np.maximum(np.maximum(u, v), 1e-9)
+    return m * np.power(np.power(u / m, p) + np.power(v / m, p), 1.0 / p)
+
+
+def op_ramp_union(d0, d1, r, t):
+    p = 1.0 / t
+    u = np.maximum(r - d0, 0.0)
+    v = np.maximum(r - d1, 0.0)
+    return np.maximum(r, np.minimum(d0, d1)) - _lp(u, v, p)
+
+
+def op_ramp_difference(d0, d1, r, t):
+    p = 1.0 / t
+    u = np.maximum(r - d0, 0.0)
+    v = np.maximum(r + d1, 0.0)
+    return np.minimum(-r, np.maximum(-d0, d1)) + _lp(u, v, p)
+
+
+def op_ramp_intersection(d0, d1, r, t):
+    p = 1.0 / t
+    u = np.maximum(r + d0, 0.0)
+    v = np.maximum(r + d1, 0.0)
+    return np.minimum(-r, np.maximum(d0, d1)) + _lp(u, v, p)
+
+
+def seam(rule, new, acc):
+    if rule == 'SHARPER':
+        return np.minimum(new, acc)
+    if rule == 'SOFTER':
+        return np.maximum(new, acc)
+    if rule == 'AVERAGE':
+        return 0.5 * (new + acc)
+    return new + 0.0 * acc                     # LATEST
+
+
+def blend_weight(operation, d0, d1, r):
+    """Weight of the new shape for colours / surface values / blend settings."""
+    if operation == 'UNION':
+        return _clamp(0.5 + 0.5 * (d1 - d0) / r, 0.0, 1.0)
+    if operation == 'SUBTRACT':
+        return _clamp(0.5 - 0.5 * (d1 + d0) / r, 0.0, 1.0)
+    return _clamp(0.5 - 0.5 * (d1 - d0) / r, 0.0, 1.0)
+
+
+def combine(d_new, d_acc, operation, mode, r, t, steps=1):
     """Combine the distance of a new shape with the accumulated result."""
-    blend = max(float(blend), EPS_BLEND)
-    if blend_type == 'NONE':
+    if mode == 'RAMP':
         if operation == 'UNION':
-            return op_union(d_new, d_acc)
+            return op_ramp_union(d_new, d_acc, r, t)
         if operation == 'SUBTRACT':
-            return op_difference(d_new, d_acc)
-        return op_intersection(d_new, d_acc)
-    if blend_type == 'SMOOTH':
-        if operation == 'UNION':
-            return op_smooth_union(d_new, d_acc, blend)
-        if operation == 'SUBTRACT':
-            return op_smooth_difference(d_new, d_acc, blend)
-        return op_smooth_intersection(d_new, d_acc, blend)
-    if blend_type == 'ROUND':
-        if operation == 'UNION':
-            return op_round_union(d_new, d_acc, blend)
-        if operation == 'SUBTRACT':
-            return op_round_difference(d_new, d_acc, blend)
-        return op_round_intersection(d_new, d_acc, blend)
-    if blend_type == 'CHAMFER':
-        if operation == 'UNION':
-            return op_chamfer_union(d_new, d_acc, blend)
-        if operation == 'SUBTRACT':
-            return op_chamfer_difference(d_new, d_acc, blend)
-        return op_chamfer_intersection(d_new, d_acc, blend)
-    if blend_type == 'STEPS':
+            return op_ramp_difference(d_new, d_acc, r, t)
+        return op_ramp_intersection(d_new, d_acc, r, t)
+    if mode == 'STEPS':
         n = float(max(1, int(steps)))
         if operation == 'UNION':
-            return op_stairs_union(d_new, d_acc, blend, n)
+            return op_stairs_union(d_new, d_acc, r, n)
         if operation == 'SUBTRACT':
-            return op_stairs_difference(d_new, d_acc, blend, n)
-        return op_stairs_intersection(d_new, d_acc, blend, n)
-    raise ValueError(blend_type)
+            return op_stairs_difference(d_new, d_acc, r, n)
+        return op_stairs_intersection(d_new, d_acc, r, n)
+    raise ValueError(mode)
 
 
 def primitive_distance(primitive, p_local, scale, rounding=0.0, tube=0.25, top_radius=0.0, sides=6):
@@ -328,27 +361,35 @@ def primitive_distance(primitive, p_local, scale, rounding=0.0, tube=0.25, top_r
     raise ValueError(primitive)
 
 
-def evaluate_fusion(points, shapes, global_blend, global_blend_type, global_steps=1):
+def evaluate_fusion(points, shapes, fusion):
     """Evaluate a whole fusion at ``points`` (N, 3) in fusion-local space.
 
-    ``shapes`` is a list of dicts with keys: ``matrix_inv_rigid`` (4x4 numpy,
-    inverse of the rigid part of the shape's transform relative to the fusion),
-    ``scale`` (3,), ``primitive``, ``operation``, and optionally
-    ``blend``/``blend_type``/``steps`` overrides, ``rounding``, ``tube``,
-    ``top_radius``.
+    ``shapes``: list of dicts with ``matrix_inv_rigid`` (4x4, inverse of the
+    rigid part of the shape's transform relative to the fusion), ``scale``,
+    ``primitive``, ``operation``, ``radius``, ``fill`` and the primitive
+    parameters.  ``fusion``: dict with ``mode``, ``seam_rule``, ``steps``,
+    ``radius_scale`` and ``fill_scale``.
     """
+    mode = fusion.get('mode', 'RAMP')
+    rule = fusion.get('seam_rule', 'SHARPER')
+    steps = fusion.get('steps', 1)
     acc = None
+    acc_r = acc_t = None
     pts_h = np.concatenate([points, np.ones((points.shape[0], 1))], axis=-1)
-    for i, sh in enumerate(shapes):
+    for sh in shapes:
         p_local = (pts_h @ np.asarray(sh['matrix_inv_rigid']).T)[..., :3]
         d = primitive_distance(sh['primitive'], p_local, sh['scale'],
                                sh.get('rounding', 0.0), sh.get('tube', 0.25), sh.get('top_radius', 0.0),
                                sh.get('sides', 6))
+        rn = np.full(len(points), sh['radius'] * fusion.get('radius_scale', 1.0))
+        tn = np.full(len(points), sh['fill'] * fusion.get('fill_scale', 1.0))
         if acc is None:
-            acc = d
+            acc, acc_r, acc_t = d, rn, tn
             continue
-        blend = sh.get('blend', global_blend) if sh.get('use_custom_blend') else global_blend
-        btype = sh.get('blend_type', global_blend_type) if sh.get('use_custom_blend') else global_blend_type
-        steps = sh.get('steps', global_steps) if sh.get('use_custom_blend') else global_steps
-        acc = combine(d, acc, sh['operation'], btype, blend, steps)
+        r = np.maximum(seam(rule, rn, acc_r), EPS_BLEND)
+        t = _clamp(seam(rule, tn, acc_t), MIN_FILL, 1.0)
+        hc = blend_weight(sh['operation'], d, acc, r)
+        acc = combine(d, acc, sh['operation'], mode, r, t, steps)
+        acc_r = acc_r * (1.0 - hc) + rn * hc
+        acc_t = acc_t * (1.0 - hc) + tn * hc
     return acc

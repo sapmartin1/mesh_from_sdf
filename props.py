@@ -33,6 +33,19 @@ BLEND_ITEMS = (
     ('NONE', 'None', 'Hard boolean, no blending'),
 )
 
+MODE_ITEMS = (
+    ('RAMP', 'Ramp', 'Concave ramp between the shapes; Radius sets its reach, Blend how full it is', 0),
+    ('STEPS', 'Steps', 'Stair-stepped transition of size Radius', 1),
+)
+
+SEAM_ITEMS = (
+    ('SHARPER', 'Sharper Wins', 'A seam uses the smaller Radius / Blend of the two shapes meeting there, '
+                                'so a delicate shape stays crisp whatever surrounds it', 0),
+    ('AVERAGE', 'Average', 'A seam uses the average of the two shapes', 1),
+    ('SOFTER', 'Softer Wins', 'A seam uses the larger Radius / Blend of the two shapes', 2),
+    ('LATEST', 'Newer Shape', 'A seam uses the settings of the shape lower in the list (pre 1.4 behaviour)', 3),
+)
+
 QUALITY_ITEMS = (
     ('LOW', 'Low', 'Fast preview (32 voxels along the longest axis)'),
     ('MEDIUM', 'Medium', 'Balanced preview (64 voxels)'),
@@ -160,16 +173,20 @@ class SDFShapeSettings(PropertyGroup):
     sides: IntProperty(
         name="Sides", default=6, min=3, max=32,
         description="Number of sides of the prism", update=_shape_param)
-    use_custom_blend: BoolProperty(
-        name="Custom Blend", default=False,
-        description="Override the fusion-wide blend for this shape", update=_shape_rebuild)
-    blend: FloatProperty(
-        name="Blend", default=0.25, min=0.0, soft_max=2.0, subtype='DISTANCE',
-        description="Blend radius used when this shape is combined", update=_shape_values)
-    blend_type: EnumProperty(
-        name="Blend Type", items=BLEND_ITEMS, default='SMOOTH', update=_shape_rebuild)
-    steps: IntProperty(
-        name="Steps", default=3, min=1, max=32, update=_shape_values)
+    radius: FloatProperty(
+        name="Radius", default=0.25, min=0.0, soft_max=2.0, subtype='DISTANCE',
+        description="How far from the seam this shape's blend reaches along and into its neighbours",
+        update=_shape_values)
+    fill: FloatProperty(
+        name="Blend", default=0.5, min=0.0, max=1.0, subtype='FACTOR',
+        description="How full the blend ramp is: low hugs the inner corner, 0.5 is a circular "
+                    "quarter-pipe, 1.0 is a flat bevel",
+        update=_shape_values)
+    # --- legacy (pre 1.4) settings, only read once by the migration ---
+    use_custom_blend: BoolProperty(default=False, options={'HIDDEN'})
+    blend: FloatProperty(default=0.25, min=0.0, options={'HIDDEN'})
+    blend_type: EnumProperty(items=BLEND_ITEMS, default='SMOOTH', options={'HIDDEN'})
+    steps: IntProperty(default=3, min=1, max=32, options={'HIDDEN'})
     color: FloatVectorProperty(
         name="Color", subtype='COLOR', size=4, min=0.0, max=1.0,
         default=(0.8, 0.8, 0.8, 1.0),
@@ -198,14 +215,28 @@ class SDFFusionSettings(PropertyGroup):
     enabled: BoolProperty(default=False, options={'HIDDEN'})
     shapes: CollectionProperty(type=SDFShapeRef)
     active_shape_index: IntProperty(default=0, update=_active_index_update)
-    blend: FloatProperty(
-        name="Blend", default=0.25, min=0.0, soft_max=2.0, subtype='DISTANCE',
-        description="Blend radius: how far the shapes melt into each other", update=_fusion_values)
-    blend_type: EnumProperty(
-        name="Blend Type", items=BLEND_ITEMS, default='SMOOTH', update=_fusion_rebuild)
+    radius_scale: FloatProperty(
+        name="Radius \u00d7", default=1.0, min=0.0, soft_max=3.0,
+        description="Multiplies the Radius of every shape: 0 gives hard booleans, above 1 melts "
+                    "the whole model further",
+        update=_fusion_values)
+    fill_scale: FloatProperty(
+        name="Blend \u00d7", default=1.0, min=0.0, soft_max=2.0,
+        description="Multiplies the Blend (ramp fullness) of every shape",
+        update=_fusion_values)
+    mode: EnumProperty(
+        name="Blend Mode", items=MODE_ITEMS, default='RAMP', update=_fusion_rebuild)
+    seam_rule: EnumProperty(
+        name="Seams", items=SEAM_ITEMS, default='SHARPER',
+        description="Whose Radius and Blend apply where two shapes meet",
+        update=_fusion_rebuild)
     steps: IntProperty(
         name="Steps", default=3, min=1, max=32,
-        description="Number of steps for the Steps blend", update=_fusion_values)
+        description="Number of steps for the Steps blend mode", update=_fusion_values)
+    data_version: IntProperty(default=0, options={'HIDDEN'})
+    # --- legacy (pre 1.4) settings, only read once by the migration ---
+    blend: FloatProperty(default=0.25, min=0.0, options={'HIDDEN'})
+    blend_type: EnumProperty(items=BLEND_ITEMS, default='SMOOTH', options={'HIDDEN'})
     quality: EnumProperty(
         name="Quality", items=QUALITY_ITEMS, default='MEDIUM',
         description="Preview resolution while modelling", update=_fusion_values)

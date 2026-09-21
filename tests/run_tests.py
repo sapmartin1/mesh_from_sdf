@@ -125,13 +125,25 @@ def reference_shapes(fusion):
             'rounding': st.rounding,
             'tube': st.tube,
             'top_radius': st.top_radius,
-            'use_custom_blend': st.use_custom_blend,
-            'blend': st.blend,
-            'blend_type': st.blend_type,
-            'steps': st.steps,
+            'radius': st.radius,
+            'fill': st.fill,
             'sides': st.sides,
         })
     return shapes
+
+
+def fusion_params(fusion):
+    fs = fusion.sdf_fusion
+    return {'mode': fs.mode, 'seam_rule': fs.seam_rule, 'steps': fs.steps,
+            'radius_scale': fs.radius_scale, 'fill_scale': fs.fill_scale}
+
+
+def set_blend(fusion, radius, fill=0.5):
+    """Give every shape of the fusion the same Radius / Blend."""
+    for ref in fusion.sdf_fusion.shapes:
+        if ref.object is not None:
+            ref.object.sdf_shape.radius = radius
+            ref.object.sdf_shape.fill = fill
 
 
 def sample_field(fusion, points):
@@ -152,31 +164,30 @@ def test_field_matches_reference():
     print("\n[1] node groups vs numpy reference")
     rng = random.Random(7)
     configs = [
-        # (primitive, operation, custom?, blend_type, blend, steps, rounding)
-        ('BOX', 'UNION', False, 'SMOOTH', 0.3, 3, 0.15),
-        ('SPHERE', 'UNION', False, 'SMOOTH', 0.3, 3, 0.0),
-        ('CYLINDER', 'SUBTRACT', True, 'ROUND', 0.25, 3, 0.1),
-        ('TORUS', 'UNION', True, 'CHAMFER', 0.2, 3, 0.0),
-        ('CONE', 'INTERSECT', True, 'STEPS', 0.4, 4, 0.0),
-        ('BOX', 'SUBTRACT', True, 'NONE', 0.0, 1, 0.0),
-        ('SPHERE', 'INTERSECT', True, 'SMOOTH', 0.5, 1, 0.0),
-        ('CYLINDER', 'UNION', True, 'STEPS', 0.3, 2, 0.0),
-        ('CONE', 'SUBTRACT', True, 'CHAMFER', 0.35, 1, 0.0),
-        ('TORUS', 'INTERSECT', True, 'ROUND', 0.3, 1, 0.0),
-        ('CAPSULE', 'UNION', False, 'SMOOTH', 0.3, 1, 0.0),
-        ('PYRAMID', 'UNION', True, 'SMOOTH', 0.4, 1, 0.0),
-        ('PRISM', 'SUBTRACT', True, 'ROUND', 0.2, 1, 0.12),
-        ('PRISM', 'UNION', True, 'NONE', 0.0, 1, 0.0),
+        # (primitive, operation, radius, fill, rounding)
+        ('BOX', 'UNION', 0.30, 0.50, 0.15),
+        ('SPHERE', 'UNION', 0.30, 0.50, 0.0),
+        ('CYLINDER', 'SUBTRACT', 0.25, 0.80, 0.1),
+        ('TORUS', 'UNION', 0.20, 1.00, 0.0),
+        ('CONE', 'INTERSECT', 0.40, 0.30, 0.0),
+        ('BOX', 'SUBTRACT', 0.00, 0.50, 0.0),
+        ('SPHERE', 'INTERSECT', 0.50, 0.10, 0.0),
+        ('CYLINDER', 'UNION', 0.30, 0.65, 0.0),
+        ('CONE', 'SUBTRACT', 0.35, 0.05, 0.0),
+        ('TORUS', 'INTERSECT', 0.30, 0.50, 0.0),
+        ('CAPSULE', 'UNION', 0.30, 0.50, 0.0),
+        ('PYRAMID', 'UNION', 0.40, 0.90, 0.0),
+        ('PRISM', 'SUBTRACT', 0.20, 0.50, 0.12),
+        ('PRISM', 'UNION', 0.05, 0.50, 0.0),
     ]
     reset_scene()
     fusion = ops.create_fusion(C, Vector((0.5, -0.3, 0.2)))
     fusion.rotation_euler = Euler((0.2, 0.1, 0.7))
-    fusion.scale = (1.0, 1.0, 1.0)
     fs = fusion.sdf_fusion
-    fs.blend = 0.3
-    fs.blend_type = 'SMOOTH'
+    fs.radius_scale = 1.2
+    fs.fill_scale = 0.9
     fs.steps = 3
-    for prim, op, custom, btype, blend, steps, rounding in configs:
+    for prim, op, radius, fill, rounding in configs:
         sh = ops.add_shape(C, fusion, prim, Vector((rng.uniform(-1.5, 1.5), rng.uniform(-1.5, 1.5), rng.uniform(-1.5, 1.5))))
         sh.rotation_euler = Euler((rng.uniform(-3, 3), rng.uniform(-3, 3), rng.uniform(-3, 3)))
         if prim in {'BOX', 'CYLINDER', 'PYRAMID', 'PRISM', 'CAPSULE'}:
@@ -185,10 +196,8 @@ def test_field_matches_reference():
             sh.scale = (rng.uniform(0.5, 1.6),) * 3 if rng.random() < 0.5 else (rng.uniform(0.5, 1.6), rng.uniform(0.5, 1.6), rng.uniform(0.5, 1.6))
         st = sh.sdf_shape
         st.operation = op
-        st.use_custom_blend = custom
-        st.blend_type = btype
-        st.blend = blend
-        st.steps = steps
+        st.radius = radius
+        st.fill = fill
         st.rounding = rounding
         st.tube = 0.3
         st.top_radius = 0.4
@@ -197,16 +206,20 @@ def test_field_matches_reference():
 
     npts = 6000
     pts = np.array([[rng.uniform(-4, 4) for _ in range(3)] for _ in range(npts)])
-    got = sample_field(fusion, pts)
-    shapes = reference_shapes(fusion)
-
-    # per-primitive check: evaluate each shape alone through the sampler vs reference
-    for i, sh in enumerate(nodes.iter_shapes(fusion)):
-        pass
-    exp = sdf_ref.evaluate_fusion(pts, shapes, fs.blend, fs.blend_type, fs.steps)
-    err = np.abs(got - exp)
-    check(np.isfinite(got).all(), "field has no NaN/inf")
-    check(err.max() < 2e-3, f"full fusion field matches reference (max err {err.max():.2e}, mean {err.mean():.2e})")
+    mode_ids = {m: i for i, m in enumerate(nodes.MODES)}
+    rule_ids = {r: i for i, r in enumerate(nodes.SEAM_RULES)}
+    for mode in nodes.MODES:
+        for rule in nodes.SEAM_RULES:
+            fs['mode'] = mode_ids[mode]
+            fs['seam_rule'] = rule_ids[rule]
+            nodes.rebuild(fusion)
+            got = sample_field(fusion, pts)
+            exp = sdf_ref.evaluate_fusion(pts, reference_shapes(fusion), fusion_params(fusion))
+            err = np.abs(got - exp)
+            check(np.isfinite(got).all() and err.max() < 2e-3,
+                  f"14-shape fusion, mode {mode:5s} seams {rule:8s} matches reference (max err {err.max():.2e})")
+    fs['mode'] = 0
+    fs['seam_rule'] = 0
 
     # every primitive on its own (through include toggles)
     all_shapes = list(nodes.iter_shapes(fusion))
@@ -215,14 +228,14 @@ def test_field_matches_reference():
             sh.sdf_shape['include'] = (sh == keep)
         nodes.rebuild(fusion)
         got1 = sample_field(fusion, pts)
-        exp1 = sdf_ref.evaluate_fusion(pts, reference_shapes(fusion), fs.blend, fs.blend_type, fs.steps)
+        exp1 = sdf_ref.evaluate_fusion(pts, reference_shapes(fusion), fusion_params(fusion))
         e1 = np.abs(got1 - exp1).max()
         check(e1 < 2e-3, f"primitive {keep.sdf_shape.primitive} alone matches reference (max err {e1:.2e})")
     for sh in all_shapes:
         sh.sdf_shape['include'] = True
     nodes.rebuild(fusion)
 
-    # every (operation, blend type) pair on a box+sphere pair
+    # every operation x mode x several fills on a box + sphere pair
     reset_scene()
     fusion = ops.create_fusion(C, Vector((0, 0, 0)))
     fs = fusion.sdf_fusion
@@ -230,17 +243,31 @@ def test_field_matches_reference():
     b = ops.add_shape(C, fusion, 'SPHERE', Vector((1.1, 0.2, 0.5)))
     b.scale = (0.9, 0.9, 0.9)
     pts2 = np.array([[rng.uniform(-2.5, 2.5) for _ in range(3)] for _ in range(4000)])
+    fs['steps'] = 3
     for op in nodes.OPERATIONS:
-        for bt in nodes.BLEND_TYPES:
-            b.sdf_shape['operation'] = list(nodes.OPERATIONS).index(op)
-            fs['blend_type'] = [it[0] for it in sdf_fusion.props.BLEND_ITEMS].index(bt)
-            fs['blend'] = 0.35
-            fs['steps'] = 3
-            nodes.rebuild(fusion)
-            got2 = sample_field(fusion, pts2)
-            exp2 = sdf_ref.evaluate_fusion(pts2, reference_shapes(fusion), 0.35, bt, 3)
-            e2 = np.abs(got2 - exp2).max()
-            check(e2 < 2e-3, f"op {op:9s} blend {bt:8s} matches reference (max err {e2:.2e})")
+        for mode in nodes.MODES:
+            for fill in ((0.02, 0.5, 1.0) if mode == 'RAMP' else (0.5,)):
+                b.sdf_shape['operation'] = list(nodes.OPERATIONS).index(op)
+                fs['mode'] = mode_ids[mode]
+                for sh in (a, b):
+                    sh.sdf_shape['radius'] = 0.35
+                    sh.sdf_shape['fill'] = fill
+                nodes.rebuild(fusion)
+                got2 = sample_field(fusion, pts2)
+                exp2 = sdf_ref.evaluate_fusion(pts2, reference_shapes(fusion), fusion_params(fusion))
+                e2 = np.abs(got2 - exp2).max()
+                check(np.isfinite(got2).all() and e2 < 2e-3, f"op {op:9s} mode {mode:5s} fill {fill:4.2f} matches reference (max err {e2:.2e})")
+
+    # the ramp reproduces upstream's round operators at Blend 0.5 and the chamfer surface at 1.0
+    d0 = np.array([rng.uniform(-1, 1) for _ in range(2000)])
+    d1 = np.array([rng.uniform(-1, 1) for _ in range(2000)])
+    check(np.allclose(sdf_ref.op_ramp_union(d0, d1, 0.3, 0.5), sdf_ref.op_round_union(d0, d1, 0.3), atol=1e-9)
+          and np.allclose(sdf_ref.op_ramp_intersection(d0, d1, 0.3, 0.5), sdf_ref.op_round_intersection(d0, d1, 0.3), atol=1e-9)
+          and np.allclose(sdf_ref.op_ramp_difference(d0, d1, 0.3, 0.5), sdf_ref.op_round_difference(d0, d1, 0.3), atol=1e-9),
+          "ramp at Blend 0.5 equals upstream's round union / intersection / difference")
+    ramp1 = sdf_ref.op_ramp_union(d0, d1, 0.3, 1.0)
+    chamf = sdf_ref.op_chamfer_union(d0, d1, 0.3)
+    check(np.all((ramp1 < 0) == (chamf < 0)), "ramp at Blend 1.0 has the same surface as upstream's chamfer union")
 
 
 # ----------------------------------------------------------------------------
@@ -268,17 +295,17 @@ def test_acceptance_flow():
 
     fs = fusion.sdf_fusion
     # hard union first
-    fs.blend_type = 'NONE'
+    set_blend(fusion, 0.0)
     s0 = mesh_stats(evaluated_mesh(fusion))
     check(s0['verts'] > 0, f"hard union produces a mesh ({s0['verts']} verts, {s0['faces']} faces)")
     check(s0['islands'] == 1, "hard union is one connected surface")
     check(abs(s0['volume'] - 8.0) < 8.0 * 0.5 and s0['volume'] > 8.0, f"union volume larger than the cube alone ({s0['volume']:.3f})")
 
     # 3. smooth union  5. adjust blend radius  6. objects melt
-    fs.blend_type = 'SMOOTH'
-    fs.blend = 0.0
+    set_blend(fusion, 0.6)
+    set_blend(fusion, 0.0)
     sA = mesh_stats(evaluated_mesh(fusion))
-    fs.blend = 0.6
+    set_blend(fusion, 0.6)
     sB = mesh_stats(evaluated_mesh(fusion))
     check(sB['volume'] > sA['volume'] + 0.05, f"raising Blend adds material between the shapes ({sA['volume']:.3f} -> {sB['volume']:.3f})")
 
@@ -292,9 +319,9 @@ def test_acceptance_flow():
         return int(np.sum((d_box > 0.03) & (d_sph > 0.03)))
     n_fillet = fillet_vertices(fs.live_resolution())
     check(n_fillet > 10, f"blended surface has vertices outside both source shapes (fillet region: {n_fillet} verts)")
-    fs.blend = 0.0
+    set_blend(fusion, 0.0)
     check(fillet_vertices(fs.live_resolution()) == 0, "with Blend 0 no fillet vertices exist")
-    fs.blend = 0.6
+    set_blend(fusion, 0.6)
 
     # 7. moving / scaling / rotating a source object updates the result
     before = mesh_stats(evaluated_mesh(fusion))
@@ -313,22 +340,22 @@ def test_acceptance_flow():
 
     # subtract / intersect
     sphere.sdf_shape.operation = 'SUBTRACT'
-    fs.blend_type = 'NONE'
+    set_blend(fusion, 0.0)
     sub = mesh_stats(evaluated_mesh(fusion))
     check(0 < sub['volume'] < 8.0, f"subtract removes material from the cube ({sub['volume']:.3f} < 8)")
     sphere.sdf_shape.operation = 'INTERSECT'
     inter = mesh_stats(evaluated_mesh(fusion))
     check(0 < inter['volume'] < min(8.0, 4.0 / 3.0 * math.pi * 0.8 ** 3), f"intersect keeps only the overlap ({inter['volume']:.3f})")
     sphere.sdf_shape.operation = 'UNION'
-    fs.blend_type = 'SMOOTH'
+    set_blend(fusion, 0.6)
 
     # smooth subtract also blends (soft edge) -> volume differs from hard subtract
     sphere.sdf_shape.operation = 'SUBTRACT'
-    fs.blend = 0.4
+    set_blend(fusion, 0.4)
     ssub = mesh_stats(evaluated_mesh(fusion))
     check(ssub['volume'] < sub['volume'] - 0.02, f"smooth subtract carves a soft, wider cut ({ssub['volume']:.3f} < {sub['volume']:.3f})")
     sphere.sdf_shape.operation = 'UNION'
-    fs.blend = 0.6
+    set_blend(fusion, 0.6)
 
     # material assigned to the fusion object reaches the generated mesh
     mat = bpy.data.materials.new('FusionMat')
@@ -417,6 +444,35 @@ def test_primitive_volumes():
         check(s['islands'] == 1 and rel < 0.06, f"{prim}: volume {s['volume']:.3f} vs analytic {vol:.3f} (rel err {rel:.1%}), {s['islands']} island")
 
 
+def test_placement():
+    print("\n[11] shapes land at the 3D cursor, also for a brand-new fusion away from the origin")
+    reset_scene()
+    C.scene.cursor.location = (2.0, 1.0, 0.5)
+    bpy.ops.sdf_fusion.add_shape(primitive='BOX')
+    box = C.active_object
+    fusion = ops.find_fusion(C)
+    C.view_layer.update()
+    check((box.matrix_world.translation - Vector((2.0, 1.0, 0.5))).length < 1e-5, f"first shape of a new fusion sits at the cursor ({tuple(round(v, 3) for v in box.matrix_world.translation)})")
+    check((fusion.matrix_world.translation - Vector((2.0, 1.0, 0.5))).length < 1e-5, "the new fusion sits at the cursor too")
+    C.scene.cursor.location = (3.5, 1.0, 1.2)
+    bpy.ops.sdf_fusion.add_shape(primitive='SPHERE')
+    sph = C.active_object
+    C.view_layer.update()
+    check((sph.matrix_world.translation - Vector((3.5, 1.0, 1.2))).length < 1e-5, "second shape sits at the moved cursor")
+    me = evaluated_mesh(fusion)
+    co = np.array([(fusion.matrix_world @ v.co)[:] for v in me.vertices])
+    check(abs(co[:, 0].min() - 1.0) < 0.05 and abs(co[:, 2].min() - (-0.5)) < 0.05, f"fused mesh is where the shapes are (world min x {co[:, 0].min():.2f}, min z {co[:, 2].min():.2f})")
+    # a rotated, moved fusion: new shapes still land at the cursor in world space
+    fusion.rotation_euler = Euler((0.3, 0.2, 0.9))
+    fusion.location = (-1.0, 2.0, 0.3)
+    C.scene.cursor.location = (0.4, -0.6, 2.0)
+    bpy.ops.sdf_fusion.add_shape(primitive='CYLINDER')
+    cyl = C.active_object
+    C.view_layer.update()
+    check((cyl.matrix_world.translation - Vector((0.4, -0.6, 2.0))).length < 1e-5, "shape added to a moved / rotated fusion sits at the cursor")
+    C.scene.cursor.location = (0, 0, 0)
+
+
 def test_cutters_and_guides():
     print("\n[9] cutters always cut, guide display, Shift+D on a shape")
     reset_scene()
@@ -424,7 +480,7 @@ def test_cutters_and_guides():
     box = ops.add_shape(C, fusion, 'BOX', Vector((0, 0, 0)))
     sph = ops.add_shape(C, fusion, 'SPHERE', Vector((1.0, 0.0, 0.6)))
     fs = fusion.sdf_fusion
-    fs.blend_type = 'NONE'
+    set_blend(fusion, 0.0)
     sphere_vol = 4.0 / 3.0 * math.pi
     # pressing Subtract on the FIRST shape must carve the other one
     box.sdf_shape.operation = 'SUBTRACT'
@@ -489,7 +545,7 @@ def test_duplicate():
     box = ops.add_shape(C, fusion, 'BOX', Vector((0, 0, 0)))
     sph = ops.add_shape(C, fusion, 'SPHERE', Vector((1.2, 0, 0.6)))
     fs = fusion.sdf_fusion
-    fs.blend = 0.5
+    set_blend(fusion, 0.5)
     C.view_layer.objects.active = fusion
     bpy.ops.sdf_fusion.duplicate_fusion()
     copy = C.active_object
@@ -533,24 +589,42 @@ def test_animation_and_apply():
     box = ops.add_shape(C, fusion, 'BOX', Vector((0, 0, 0)))
     sph = ops.add_shape(C, fusion, 'SPHERE', Vector((1.2, 0, 0.6)))
     fs = fusion.sdf_fusion
-    fs.blend = 0.0
+    set_blend(fusion, 0.8)
+    fs.radius_scale = 0.0
     v0 = mesh_stats(evaluated_mesh(fusion))['volume']
-    fs.blend = 0.8
+    fs.radius_scale = 1.0
     v8 = mesh_stats(evaluated_mesh(fusion))['volume']
-    fs.blend = 0.0
-    fusion.keyframe_insert('sdf_fusion.blend', frame=1)
-    fs.blend = 0.8
-    fusion.keyframe_insert('sdf_fusion.blend', frame=21)
+    fs.radius_scale = 0.0
+    fusion.keyframe_insert('sdf_fusion.radius_scale', frame=1)
+    fs.radius_scale = 1.0
+    fusion.keyframe_insert('sdf_fusion.radius_scale', frame=21)
     scene.frame_set(21)
     va = mesh_stats(evaluated_mesh(fusion))['volume']
     scene.frame_set(1)
     vb = mesh_stats(evaluated_mesh(fusion))['volume']
     scene.frame_set(11)
     vm = mesh_stats(evaluated_mesh(fusion))['volume']
-    check(abs(va - v8) < 1e-3 and abs(vb - v0) < 1e-3, f"keyframed Blend drives the node tree (frame 21: {va:.3f} vs {v8:.3f}, frame 1: {vb:.3f} vs {v0:.3f})")
+    check(abs(va - v8) < 1e-3 and abs(vb - v0) < 1e-3, f"keyframed Radius multiplier drives the node tree (frame 21: {va:.3f} vs {v8:.3f}, frame 1: {vb:.3f} vs {v0:.3f})")
     check(vb < vm < va, f"in-between frame interpolates ({vb:.3f} < {vm:.3f} < {va:.3f})")
     fusion.animation_data_clear()
-    fs.blend = 0.5
+    fs.radius_scale = 1.0
+
+    # a per-shape Radius can be keyframed too
+    set_blend(fusion, 0.0)
+    h0 = mesh_stats(evaluated_mesh(fusion))['volume']
+    sph.sdf_shape.radius = 0.0
+    sph.keyframe_insert('sdf_shape.radius', frame=1)
+    sph.sdf_shape.radius = 0.7
+    sph.keyframe_insert('sdf_shape.radius', frame=21)
+    fs.seam_rule = 'LATEST'
+    scene.frame_set(21)
+    h21 = mesh_stats(evaluated_mesh(fusion))['volume']
+    scene.frame_set(1)
+    h1 = mesh_stats(evaluated_mesh(fusion))['volume']
+    check(abs(h1 - h0) < 1e-3 and h21 > h0 + 0.05, f"keyframed per-shape Radius drives the node tree ({h1:.3f} -> {h21:.3f})")
+    sph.animation_data_clear()
+    fs.seam_rule = 'SHARPER'
+    set_blend(fusion, 0.5)
 
     # keyframed shape colour reaches the mesh
     fs.blend_colors = True
@@ -587,6 +661,120 @@ def test_animation_and_apply():
     check(np.allclose(cur, ref, atol=1e-6), "proxy mesh restored to the unit primitive")
 
 
+def test_ramp_family():
+    print("\n[10] ramp blend family: Radius / Blend per shape, seam rules, migration")
+    reset_scene()
+    fusion = ops.create_fusion(C, Vector((0, 0, 0)))
+    box = ops.add_shape(C, fusion, 'BOX', Vector((0, 0, 0)))
+    sph = ops.add_shape(C, fusion, 'SPHERE', Vector((1.3, 0.0, 0.7)))
+    sph.scale = (0.8, 0.8, 0.8)
+    fs = fusion.sdf_fusion
+    fs.quality = 'HIGH'
+    check(abs(box.sdf_shape.radius - 0.25) < 1e-6 and abs(box.sdf_shape.fill - 0.5) < 1e-6 and fs.mode == 'RAMP' and fs.seam_rule == 'SHARPER',
+          "new shapes start with Radius 0.25 / Blend 0.5, ramp mode, sharper-wins seams")
+
+    def vol():
+        return mesh_stats(evaluated_mesh(fusion))['volume']
+    set_blend(fusion, 0.0)
+    hard = vol()
+    vols = []
+    for fill in (0.05, 0.25, 0.5, 0.75, 1.0):
+        set_blend(fusion, 0.6, fill)
+        vols.append(vol())
+    check(all(b_ > a_ + 1e-3 for a_, b_ in zip(vols, vols[1:])) and vols[0] > hard - 1e-3,
+          "Blend (fill) adds material monotonically: " + " < ".join(f"{v:.3f}" for v in vols))
+    rv = []
+    for radius in (0.1, 0.3, 0.6, 0.9):
+        set_blend(fusion, radius, 0.5)
+        rv.append(vol())
+    check(all(b_ > a_ + 1e-3 for a_, b_ in zip(rv, rv[1:])), "Radius adds material monotonically: " + " < ".join(f"{v:.3f}" for v in rv))
+    set_blend(fusion, 0.6, 0.5)
+    fs.radius_scale = 0.0
+    check(abs(vol() - hard) < 2e-3, "Radius multiplier 0 gives the hard boolean")
+    fs.radius_scale = 0.5
+    half = vol()
+    set_blend(fusion, 0.3, 0.5)
+    fs.radius_scale = 1.0
+    check(abs(vol() - half) < 1e-4, "Radius multiplier scales every shape's Radius")
+
+    # the ramp is bounded: it never reaches further than Radius and never beyond the flat bevel
+    for fill in (0.2, 0.5, 1.0):
+        set_blend(fusion, 0.6, fill)
+        me = evaluated_mesh(fusion)
+        co = np.array([v.co[:] for v in me.vertices])
+        shapes = reference_shapes(fusion)
+        hom = np.c_[co, np.ones(len(co))]
+        d_box = sdf_ref.primitive_distance('BOX', (hom @ shapes[0]['matrix_inv_rigid'].T)[:, :3], shapes[0]['scale'])
+        d_sph = sdf_ref.primitive_distance('SPHERE', (hom @ shapes[1]['matrix_inv_rigid'].T)[:, :3], shapes[1]['scale'])
+        fil = (d_box > 0.02) & (d_sph > 0.02)
+        tol = 0.03
+        ok = fil.sum() > 10 and d_box[fil].max() < 0.6 + tol and d_sph[fil].max() < 0.6 + tol and (d_box[fil] + d_sph[fil]).max() < 0.6 + tol
+        check(ok, f"Blend {fill:.1f}: fillet stays within Radius and inside the flat bevel ({int(fil.sum())} fillet verts)")
+
+    # per-object blending: a delicate knob keeps tight seams whatever its neighbours use
+    knob = ops.add_shape(C, fusion, 'SPHERE', Vector((-0.55, 0.0, 1.05)))
+    knob.scale = (0.3, 0.3, 0.3)
+    box.sdf_shape.radius = 0.7
+    sph.sdf_shape.radius = 0.7
+    knob.sdf_shape.radius = 0.02
+
+    def knob_fillet():
+        me = evaluated_mesh(fusion)
+        co = np.array([v.co[:] for v in me.vertices])
+        shp = {s_['primitive'] + str(i): s_ for i, s_ in enumerate(reference_shapes(fusion))}
+        hom = np.c_[co, np.ones(len(co))]
+        order = [r.object for r in fs.shapes]
+        refs = reference_shapes(fusion)
+        kb = refs[order.index(knob)]
+        bx = refs[order.index(box)]
+        sp = refs[order.index(sph)]
+        d_k = sdf_ref.primitive_distance('SPHERE', (hom @ kb['matrix_inv_rigid'].T)[:, :3], kb['scale'])
+        d_b = sdf_ref.primitive_distance('BOX', (hom @ bx['matrix_inv_rigid'].T)[:, :3], bx['scale'])
+        d_s = sdf_ref.primitive_distance('SPHERE', (hom @ sp['matrix_inv_rigid'].T)[:, :3], sp['scale'])
+        # fillet vertices around the knob, outside the reach of the big box / sphere fillet
+        return int(np.sum((d_k > 0.04) & (d_b > 0.04) & (d_k < 0.5) & (d_s > 0.75)))
+    fs.auto_order = False
+    fs.seam_rule = 'SHARPER'
+    tight_last = knob_fillet()
+    fs.shapes.move(2, 0)                       # knob first: neighbours come later in the list
+    nodes.rebuild(fusion)
+    tight_first = knob_fillet()
+    fs.seam_rule = 'LATEST'
+    loose_first = knob_fillet()
+    check(tight_last < 40 and tight_first < 40, f"Sharper Wins keeps the knob's seam tight in any list position ({tight_last} / {tight_first} fillet verts)")
+    check(loose_first > 5 * max(tight_first, 1) and loose_first > 200, f"the old order-dependent rule would have swallowed it ({loose_first} fillet verts)")
+    fs.seam_rule = 'SHARPER'
+    big_before = mesh_stats(evaluated_mesh(fusion))['volume']
+    knob.sdf_shape.radius = 0.01
+    check(abs(mesh_stats(evaluated_mesh(fusion))['volume'] - big_before) < 0.02, "tweaking the knob leaves the box / sphere seam alone")
+    fs.auto_order = True
+
+    # migration of a pre-1.4 fusion
+    reset_scene()
+    fusion = ops.create_fusion(C, Vector((0, 0, 0)))
+    a = ops.add_shape(C, fusion, 'BOX', Vector((0, 0, 0)))
+    b = ops.add_shape(C, fusion, 'SPHERE', Vector((1.2, 0, 0.6)))
+    c = ops.add_shape(C, fusion, 'CYLINDER', Vector((-1.0, 0, 0.8)))
+    fs = fusion.sdf_fusion
+    fs['data_version'] = 0
+    fs['blend'] = 0.4
+    fs['blend_type'] = 2                        # CHAMFER
+    b.sdf_shape['use_custom_blend'] = True
+    b.sdf_shape['blend'] = 0.1
+    b.sdf_shape['blend_type'] = 4               # NONE
+    c.sdf_shape['use_custom_blend'] = True
+    c.sdf_shape['blend'] = 0.15
+    c.sdf_shape['blend_type'] = 0               # SMOOTH
+    for sh in (a, b, c):
+        sh.sdf_shape['radius'] = 9.0            # junk that the migration must overwrite
+    check(ops.migrate_fusion(fusion), "legacy fusion detected and migrated")
+    check(abs(a.sdf_shape.radius - 0.4) < 1e-6 and abs(a.sdf_shape.fill - 1.0) < 1e-6, "global Chamfer 0.4 -> Radius 0.4, Blend 1.0")
+    check(b.sdf_shape.radius == 0.0 and abs(c.sdf_shape.radius - 0.15) < 1e-6 and abs(c.sdf_shape.fill - 0.5) < 1e-6, "per-shape overrides -> None = Radius 0, Smooth 0.15 = Radius 0.15 / Blend 0.5")
+    check(fs.seam_rule == 'LATEST' and fs.data_version == ops.DATA_VERSION and fs.mode == 'RAMP', "overrides keep the old seam behaviour; version stamped")
+    check(not ops.migrate_fusion(fusion), "migration runs only once")
+    check(mesh_stats(evaluated_mesh(fusion))['verts'] > 0, "migrated fusion evaluates")
+
+
 def test_color_blending():
     print("\n[5] colour blending across the seam")
     reset_scene()
@@ -598,8 +786,8 @@ def test_color_blending():
     box.sdf_shape.color = RED
     sph.sdf_shape.color = BLUE
     fs = fusion.sdf_fusion
-    fs.blend = 0.6
-    fs.blend_type = 'SMOOTH'
+    set_blend(fusion, 0.6)
+    set_blend(fusion, 0.6)
     fs.quality = 'HIGH'
     fs.blend_colors = True
 
@@ -624,11 +812,11 @@ def test_color_blending():
     used = {me.materials[p.material_index].name for p in me.polygons}
     check(used == {ops.COLOR_MATERIAL_NAME}, "generated mesh uses the colour material")
 
-    fs.blend_type = 'NONE'
+    set_blend(fusion, 0.0)
     cols2, co2, _ = colours()
     mid2 = np.sum((cols2[:, 0] > 0.3) & (cols2[:, 0] < 0.8))
     check(mid2 == 0, "hard union switches colour sharply (no in-between vertices)")
-    fs.blend_type = 'SMOOTH'
+    set_blend(fusion, 0.6)
 
     box.sdf_shape.color = GREEN
     cols3, co3, _ = colours()
@@ -694,7 +882,7 @@ def test_material_blending():
     sph = ops.add_shape(C, fusion, 'SPHERE', Vector((1.3, 0.0, 0.7)))
     sph.scale = (0.8, 0.8, 0.8)
     fs = fusion.sdf_fusion
-    fs.blend = 0.6
+    set_blend(fusion, 0.6)
     fs.quality = 'HIGH'
 
     def principled_mat(name, color, metallic, roughness, transmission, ior, emission, strength):
@@ -770,7 +958,7 @@ def test_timing():
 
 def main():
     t0 = time.perf_counter()
-    for test in (test_field_matches_reference, test_acceptance_flow, test_primitive_volumes, test_cutters_and_guides, test_duplicate, test_animation_and_apply, test_color_blending, test_material_blending, test_timing):
+    for test in (test_field_matches_reference, test_acceptance_flow, test_primitive_volumes, test_placement, test_cutters_and_guides, test_duplicate, test_animation_and_apply, test_ramp_family, test_color_blending, test_material_blending, test_timing):
         try:
             t_start = time.perf_counter()
             test()

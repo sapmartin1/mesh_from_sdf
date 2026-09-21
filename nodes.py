@@ -21,7 +21,7 @@ upstream GLSL library (see ``sdf_ref.py`` for the readable reference).
 
 import bpy
 
-GROUP_VERSION = 3
+GROUP_VERSION = 4
 COLOR_ATTRIBUTE = "Color"
 SURFACE_ATTRIBUTE = "SDF Surface"     # (metallic, roughness, transmission)
 EXTRA_ATTRIBUTE = "SDF Extra"         # (ior, emission strength, 0)
@@ -34,7 +34,6 @@ SQRT05 = 0.70710678118
 
 PRIMITIVES = ('BOX', 'SPHERE', 'CYLINDER', 'TORUS', 'CONE', 'CAPSULE', 'PYRAMID', 'PRISM')
 OPERATIONS = ('UNION', 'SUBTRACT', 'INTERSECT')
-BLEND_TYPES = ('NONE', 'SMOOTH', 'ROUND', 'CHAMFER', 'STEPS')
 
 
 # ----------------------------------------------------------------------------
@@ -402,17 +401,35 @@ def primitive_group(primitive):
 
 
 # ----------------------------------------------------------------------------
-# boolean / blend node groups (ports of opUnion, opSmoothUnion, opRoundUnion,
-# opChampferUnion, opStairsUnion and their difference / intersection variants)
+# boolean / blend node groups
 #
 # Convention: ``Distance`` is the NEW shape (d0), ``Accumulated`` is the result
 # so far (d1); SUBTRACT removes the new shape from the accumulated result.
+#
+# RAMP mode is a p-norm generalisation of hg_sdf's round union (upstream
+# ``opRoundUnion``):   u = max(r - d0, 0),  v = max(r - d1, 0)
+#     union = max(r, min(d0, d1)) - (u^p + v^p)^(1/p),      p = 1 / fill
+# fill 0.5 (p = 2) is the circular quarter-pipe, fill 1 (p = 1) the flat bevel,
+# fill -> 0 (p -> inf) the hard boolean.  For every p >= 1 the fillet is
+# concave, leaves both surfaces tangentially and starts exactly ``r`` from the
+# seam, so Radius (reach) and Blend (fill) are independent and can never
+# overshoot.  STEPS keeps upstream's opStairsUnion with the radius as its size.
+#
+# Radius and fill are per shape.  They travel with the field as a vector
+# (radius, fill, 0) that is mixed like the colours, so at every seam the op
+# sees the settings of the new shape and of whichever shape dominates the
+# accumulated result there; the seam rule decides how the two combine.
 # ----------------------------------------------------------------------------
+
+MODES = ('RAMP', 'STEPS')
+SEAM_RULES = ('SHARPER', 'AVERAGE', 'SOFTER', 'LATEST')
+MIN_FILL = 0.02
 
 _OP_INPUTS = [
     ('Distance', 'NodeSocketFloat', 0.0),
     ('Accumulated', 'NodeSocketFloat', 0.0),
-    ('Blend', 'NodeSocketFloat', 0.0),
+    ('Params', 'NodeSocketVector', (0.25, 0.5, 0.0)),
+    ('Accumulated Params', 'NodeSocketVector', (0.25, 0.5, 0.0)),
     ('Steps', 'NodeSocketFloat', 1.0),
     ('Color', 'NodeSocketColor', (0.8, 0.8, 0.8, 1.0)),
     ('Accumulated Color', 'NodeSocketColor', (0.8, 0.8, 0.8, 1.0)),
@@ -423,100 +440,74 @@ _OP_INPUTS = [
     ('Emission', 'NodeSocketColor', (0.0, 0.0, 0.0, 1.0)),
     ('Accumulated Emission', 'NodeSocketColor', (0.0, 0.0, 0.0, 1.0)),
 ]
-_OP_OUTPUTS = [('Result', 'NodeSocketFloat'), ('Result Color', 'NodeSocketColor'),
+_OP_OUTPUTS = [('Result', 'NodeSocketFloat'), ('Result Params', 'NodeSocketVector'),
+               ('Result Color', 'NodeSocketColor'),
                ('Result Surface', 'NodeSocketVector'), ('Result Extra', 'NodeSocketVector'),
                ('Result Emission', 'NodeSocketColor')]
 
 
-def _build_op(name, operation, blend_type):
+def _build_op(name, operation, mode, rule):
     ng, b, gi, go = _new_group(name, _OP_INPUTS, _OP_OUTPUTS)
     d0, d1 = gi.outputs['Distance'], gi.outputs['Accumulated']
     c0, c1 = gi.outputs['Color'], gi.outputs['Accumulated Color']
-    k = b.math('MAXIMUM', gi.outputs['Blend'], EPS_BLEND)
+    pn, pa = gi.outputs['Params'], gi.outputs['Accumulated Params']
+    rn, tn, _zn = b.sep(pn)
+    ra, ta, _za = b.sep(pa)
+    if rule == 'SHARPER':
+        rj, tj = b.math('MINIMUM', rn, ra), b.math('MINIMUM', tn, ta)
+    elif rule == 'SOFTER':
+        rj, tj = b.math('MAXIMUM', rn, ra), b.math('MAXIMUM', tn, ta)
+    elif rule == 'AVERAGE':
+        rj = b.math('MULTIPLY', b.math('ADD', rn, ra), 0.5)
+        tj = b.math('MULTIPLY', b.math('ADD', tn, ta), 0.5)
+    else:                                   # LATEST: the new shape decides
+        rj, tj = rn, tn
+    r = b.math('MAXIMUM', rj, EPS_BLEND)
+    t = b.math('MINIMUM', b.math('MAXIMUM', tj, MIN_FILL), 1.0)
     n = b.math('MAXIMUM', gi.outputs['Steps'], 1.0)
 
-    # Colour weight of the NEW shape.  For smooth blends it is the same
-    # interpolation factor as the distance; the other blend families borrow it
-    # so colours cross-fade over the blend width; hard booleans switch at the
-    # surface that wins.
-    if blend_type == 'NONE':
-        if operation == 'UNION':
-            hc = b.math('LESS_THAN', d0, d1)
-        elif operation == 'SUBTRACT':
-            hc = b.math('GREATER_THAN', b.neg(d0), d1)
-        else:
-            hc = b.math('GREATER_THAN', d0, d1)
+    # weight of the NEW shape for colours, surface values and blend settings:
+    # a cross-fade as wide as the radius (a step when the radius is zero)
+    if operation == 'UNION':
+        hc = b.clamp01(b.math('MULTIPLY_ADD', b.math('DIVIDE', b.math('SUBTRACT', d1, d0), r), 0.5, 0.5))
+    elif operation == 'SUBTRACT':
+        hc = b.clamp01(b.math('MULTIPLY_ADD', b.math('DIVIDE', b.math('ADD', d1, d0), r), -0.5, 0.5))
     else:
-        if operation == 'UNION':
-            hc = b.clamp01(b.math('MULTIPLY_ADD', b.math('DIVIDE', b.math('SUBTRACT', d1, d0), k), 0.5, 0.5))
-        elif operation == 'SUBTRACT':
-            hc = b.clamp01(b.math('MULTIPLY_ADD', b.math('DIVIDE', b.math('ADD', d1, d0), k), -0.5, 0.5))
-        else:
-            hc = b.clamp01(b.math('MULTIPLY_ADD', b.math('DIVIDE', b.math('SUBTRACT', d1, d0), k), -0.5, 0.5))
+        hc = b.clamp01(b.math('MULTIPLY_ADD', b.math('DIVIDE', b.math('SUBTRACT', d1, d0), r), -0.5, 0.5))
+    b.link(b.mix_vector(pa, pn, hc), go.inputs['Result Params'])
     b.link(b.mix_color(c1, c0, hc), go.inputs['Result Color'])
     b.link(b.mix_vector(gi.outputs['Accumulated Surface'], gi.outputs['Surface'], hc), go.inputs['Result Surface'])
     b.link(b.mix_vector(gi.outputs['Accumulated Extra'], gi.outputs['Extra'], hc), go.inputs['Result Extra'])
     b.link(b.mix_color(gi.outputs['Accumulated Emission'], gi.outputs['Emission'], hc), go.inputs['Result Emission'])
 
-    if blend_type == 'NONE':
-        if operation == 'UNION':
-            res = b.math('MINIMUM', d0, d1)
-        elif operation == 'SUBTRACT':
-            res = b.math('MAXIMUM', b.neg(d0), d1)
-        else:
-            res = b.math('MAXIMUM', d0, d1)
+    if mode == 'RAMP':
+        p = b.math('DIVIDE', 1.0, t)
 
-    elif blend_type == 'SMOOTH':
+        def lp(u, v):
+            # p-norm of (u, v), normalised by the larger one so u^p never overflows
+            m = b.math('MAXIMUM', b.math('MAXIMUM', u, v), 1e-9)
+            s = b.math('ADD', b.math('POWER', b.math('DIVIDE', u, m), p),
+                       b.math('POWER', b.math('DIVIDE', v, m), p))
+            return b.math('MULTIPLY', m, b.math('POWER', s, t))
         if operation == 'UNION':
-            h = b.clamp01(b.math('MULTIPLY_ADD', b.math('DIVIDE', b.math('SUBTRACT', d1, d0), k), 0.5, 0.5))
-            bulge = b.math('MULTIPLY', k, b.math('MULTIPLY', h, b.math('SUBTRACT', 1.0, h)))
-            res = b.math('SUBTRACT', b.mix(d1, d0, h), bulge)
+            u = b.math('MAXIMUM', b.math('SUBTRACT', r, d0), 0.0)
+            v = b.math('MAXIMUM', b.math('SUBTRACT', r, d1), 0.0)
+            res = b.math('SUBTRACT', b.math('MAXIMUM', r, b.math('MINIMUM', d0, d1)), lp(u, v))
         elif operation == 'SUBTRACT':
-            h = b.clamp01(b.math('MULTIPLY_ADD', b.math('DIVIDE', b.math('ADD', d1, d0), k), -0.5, 0.5))
-            bulge = b.math('MULTIPLY', k, b.math('MULTIPLY', h, b.math('SUBTRACT', 1.0, h)))
-            res = b.math('ADD', b.mix(d1, b.neg(d0), h), bulge)
+            u = b.math('MAXIMUM', b.math('SUBTRACT', r, d0), 0.0)
+            v = b.math('MAXIMUM', b.math('ADD', r, d1), 0.0)
+            res = b.math('ADD', b.math('MINIMUM', b.neg(r), b.math('MAXIMUM', b.neg(d0), d1)), lp(u, v))
         else:
-            h = b.clamp01(b.math('MULTIPLY_ADD', b.math('DIVIDE', b.math('SUBTRACT', d1, d0), k), -0.5, 0.5))
-            bulge = b.math('MULTIPLY', k, b.math('MULTIPLY', h, b.math('SUBTRACT', 1.0, h)))
-            res = b.math('ADD', b.mix(d1, d0, h), bulge)
-
-    elif blend_type == 'ROUND':
-        if operation == 'UNION':
-            ux = b.math('MAXIMUM', b.math('SUBTRACT', k, d0), 0.0)
-            uy = b.math('MAXIMUM', b.math('SUBTRACT', k, d1), 0.0)
-            ulen = b.math('SQRT', b.math('MULTIPLY_ADD', ux, ux, b.math('MULTIPLY', uy, uy)))
-            res = b.math('SUBTRACT', b.math('MAXIMUM', k, b.math('MINIMUM', d0, d1)), ulen)
-        elif operation == 'SUBTRACT':
-            # round intersection of (-d0, d1)
-            ux = b.math('MAXIMUM', b.math('SUBTRACT', k, d0), 0.0)
-            uy = b.math('MAXIMUM', b.math('ADD', k, d1), 0.0)
-            ulen = b.math('SQRT', b.math('MULTIPLY_ADD', ux, ux, b.math('MULTIPLY', uy, uy)))
-            res = b.math('ADD', b.math('MINIMUM', b.neg(k), b.math('MAXIMUM', b.neg(d0), d1)), ulen)
-        else:
-            ux = b.math('MAXIMUM', b.math('ADD', k, d0), 0.0)
-            uy = b.math('MAXIMUM', b.math('ADD', k, d1), 0.0)
-            ulen = b.math('SQRT', b.math('MULTIPLY_ADD', ux, ux, b.math('MULTIPLY', uy, uy)))
-            res = b.math('ADD', b.math('MINIMUM', b.neg(k), b.math('MAXIMUM', d0, d1)), ulen)
-
-    elif blend_type == 'CHAMFER':
-        if operation == 'UNION':
-            diag = b.math('MULTIPLY', b.math('ADD', b.math('SUBTRACT', d0, k), d1), SQRT05)
-            res = b.math('MINIMUM', b.math('MINIMUM', d0, d1), diag)
-        elif operation == 'SUBTRACT':
-            nd0 = b.neg(d0)
-            diag = b.math('MULTIPLY', b.math('ADD', b.math('ADD', nd0, k), d1), SQRT05)
-            res = b.math('MAXIMUM', b.math('MAXIMUM', nd0, d1), diag)
-        else:
-            diag = b.math('MULTIPLY', b.math('ADD', b.math('ADD', d0, k), d1), SQRT05)
-            res = b.math('MAXIMUM', b.math('MAXIMUM', d0, d1), diag)
-
-    elif blend_type == 'STEPS':
+            u = b.math('MAXIMUM', b.math('ADD', r, d0), 0.0)
+            v = b.math('MAXIMUM', b.math('ADD', r, d1), 0.0)
+            res = b.math('ADD', b.math('MINIMUM', b.neg(r), b.math('MAXIMUM', d0, d1)), lp(u, v))
+    elif mode == 'STEPS':
         def stairs_union(a, c):
-            s_ = b.math('DIVIDE', k, n)
-            u = b.math('SUBTRACT', c, k)
+            s_ = b.math('DIVIDE', r, n)
+            u = b.math('SUBTRACT', c, r)
             m = b.math('FLOORED_MODULO', b.math('ADD', b.math('SUBTRACT', u, a), s_), b.math('MULTIPLY', s_, 2.0))
-            t = b.math('ABSOLUTE', b.math('SUBTRACT', m, s_))
-            stair = b.math('MULTIPLY', b.math('ADD', b.math('ADD', u, a), t), 0.5)
+            tt = b.math('ABSOLUTE', b.math('SUBTRACT', m, s_))
+            stair = b.math('MULTIPLY', b.math('ADD', b.math('ADD', u, a), tt), 0.5)
             return b.math('MINIMUM', b.math('MINIMUM', a, c), stair)
         if operation == 'UNION':
             res = stairs_union(d0, d1)
@@ -525,17 +516,17 @@ def _build_op(name, operation, blend_type):
         else:
             res = b.neg(stairs_union(b.neg(d0), b.neg(d1)))
     else:
-        raise ValueError(blend_type)
+        raise ValueError(mode)
 
     b.link(res, go.inputs['Result'])
     return ng
 
 
-def op_group(operation, blend_type):
-    name = f"SDFF Op {operation.title()} {blend_type.title()} v{GROUP_VERSION}"
+def op_group(operation, mode, rule):
+    name = f"SDFF Op {operation.title()} {mode.title()} {rule.title()} v{GROUP_VERSION}"
     ng = bpy.data.node_groups.get(name)
     if ng is None:
-        ng = _build_op(name, operation, blend_type)
+        ng = _build_op(name, operation, mode, rule)
     return ng
 
 
@@ -635,13 +626,15 @@ def _ensure_interface(tree):
         tree.interface.new_socket('Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
 
 
-def build_field(b, fusion_ob, shapes, position, global_blend, global_steps):
+def build_field(b, fusion_ob, shapes, position, global_params, global_steps):
     """Emit the distance field for ``shapes``; returns the accumulated socket.
 
     Shared by the modifier tree and by the test-suite's field sampler.
     """
     settings = fusion_ob.sdf_fusion
+    mode, rule = settings.mode, settings.seam_rule
     acc = None
+    acc_params = None
     acc_color = None
     acc_surface = None
     acc_extra = None
@@ -652,6 +645,7 @@ def build_field(b, fusion_ob, shapes, position, global_blend, global_steps):
         surface = b.vector_input((st.metallic, st.roughness, st.transmission), f'SURFACE_{i}')
         extra = b.vector_input((st.ior, st.emission_strength, 0.0), f'EXTRA_{i}')
         emission = b.color_input(st.emission_color, f'EMISSION_{i}')
+        params = b.vmath('MULTIPLY', b.vector_input((st.radius, st.fill, 0.0), f'PARAMS_{i}'), global_params)
         oi = b.node('GeometryNodeObjectInfo', f'OBJ_{i}')
         oi.transform_space = 'RELATIVE'
         oi.inputs['Object'].default_value = sh
@@ -677,12 +671,16 @@ def build_field(b, fusion_ob, shapes, position, global_blend, global_steps):
 
         if acc is None:
             acc = d
+            acc_params = params
             acc_color, acc_surface, acc_extra, acc_emission = color, surface, extra, emission
             continue
-        btype = st.blend_type if st.use_custom_blend else settings.blend_type
-        opn = b.group(op_group(st.operation, btype), f'OP_{i}')
+        opn = b.group(op_group(st.operation, mode, rule), f'OP_{i}')
         b.link(d, opn.inputs['Distance'])
         b.link(acc, opn.inputs['Accumulated'])
+        b.link(params, opn.inputs['Params'])
+        b.link(acc_params, opn.inputs['Accumulated Params'])
+        b.link(global_steps, opn.inputs['Steps'])
+        acc_params = opn.outputs['Result Params']
         b.link(color, opn.inputs['Color'])
         b.link(acc_color, opn.inputs['Accumulated Color'])
         b.link(surface, opn.inputs['Surface'])
@@ -695,21 +693,14 @@ def build_field(b, fusion_ob, shapes, position, global_blend, global_steps):
         acc_surface = opn.outputs['Result Surface']
         acc_extra = opn.outputs['Result Extra']
         acc_emission = opn.outputs['Result Emission']
-        if st.use_custom_blend:
-            opn.inputs['Blend'].default_value = st.blend
-            opn.inputs['Steps'].default_value = float(st.steps)
-        else:
-            b.link(global_blend, opn.inputs['Blend'])
-            b.link(global_steps, opn.inputs['Steps'])
         acc = opn.outputs['Result']
     return acc, (acc_color, acc_surface, acc_extra, acc_emission)
 
 
-def max_custom_blend(fusion_ob):
+def max_radius(fusion_ob):
     m = 0.0
     for sh in iter_shapes(fusion_ob):
-        if sh.sdf_shape.use_custom_blend:
-            m = max(m, sh.sdf_shape.blend)
+        m = max(m, sh.sdf_shape.radius)
     return m
 
 
@@ -731,14 +722,14 @@ def rebuild(fusion_ob):
         b.link(gi.outputs[0], go.inputs[0])
         return tree
 
-    blend = b.value(settings.blend, 'GLOBAL_BLEND')
+    gparams = b.vector_input((settings.radius_scale, settings.fill_scale, 1.0), 'GLOBAL_PARAMS')
     steps = b.value(float(settings.steps), 'GLOBAL_STEPS')
     resolution = b.integer(settings.live_resolution(), 'RESOLUTION')
     adaptivity = b.value(settings.adaptivity, 'ADAPTIVITY')
-    pad_blend = b.value(max_custom_blend(fusion_ob), 'PAD_BLEND')
+    pad_radius = b.value(max_radius(fusion_ob), 'PAD_RADIUS')
     position = b.node('GeometryNodeInputPosition').outputs[0]
 
-    acc, (acc_color, acc_surface, acc_extra, acc_emission) = build_field(b, fusion_ob, shapes, position, blend, steps)
+    acc, (acc_color, acc_surface, acc_extra, acc_emission) = build_field(b, fusion_ob, shapes, position, gparams, steps)
 
     # bounds: union of the proxy meshes (already in fusion-local space)
     join = b.node('GeometryNodeJoinGeometry', 'BOUNDS_JOIN')
@@ -750,7 +741,8 @@ def rebuild(fusion_ob):
     mn, mx = bbox.outputs['Min'], bbox.outputs['Max']
     ex, ey, ez = b.sep(b.vmath('SUBTRACT', mx, mn))
     voxel0 = b.math('DIVIDE', b.max3(ex, ey, ez), resolution)
-    pad = b.math('ADD', b.math('MAXIMUM', blend, pad_blend), b.math('MULTIPLY_ADD', voxel0, 2.0, 0.001))
+    gscale_r, _gscale_t, _gz = b.sep(gparams)
+    pad = b.math('ADD', b.math('MULTIPLY', pad_radius, gscale_r), b.math('MULTIPLY_ADD', voxel0, 2.0, 0.001))
     padv = b.comb(pad, pad, pad)
     mn2 = b.vmath('SUBTRACT', mn, padv)
     mx2 = b.vmath('ADD', mx, padv)
@@ -870,13 +862,16 @@ def add_drivers(tree, fusion_ob, shapes):
     """Wire every scalar/colour node value to its property so animation and
     drivers on the properties reach the evaluated tree."""
     nodes = tree.nodes
-    nodes['GLOBAL_BLEND'].outputs[0].driver_add  # noqa: B018 (ensure socket exists)
-    _drive(nodes['GLOBAL_BLEND'].outputs[0], 'default_value', fusion_ob, 'sdf_fusion.blend')
+    _drive(nodes['GLOBAL_PARAMS'], 'vector', fusion_ob, 'sdf_fusion.radius_scale', 0)
+    _drive(nodes['GLOBAL_PARAMS'], 'vector', fusion_ob, 'sdf_fusion.fill_scale', 1)
     _drive(nodes['GLOBAL_STEPS'].outputs[0], 'default_value', fusion_ob, 'sdf_fusion.steps')
     _drive(nodes['ADAPTIVITY'].outputs[0], 'default_value', fusion_ob, 'sdf_fusion.adaptivity')
-    custom = []
     for i, sh in enumerate(shapes):
         st = sh.sdf_shape
+        pnode = nodes.get(f'PARAMS_{i}')
+        if pnode is not None:
+            _drive(pnode, 'vector', sh, 'sdf_shape.radius', 0)
+            _drive(pnode, 'vector', sh, 'sdf_shape.fill', 1)
         prim = nodes[f'PRIM_{i}']
         _drive(prim.inputs['Rounding'], 'default_value', sh, 'sdf_shape.rounding')
         ppath = _param_path(st)
@@ -900,24 +895,18 @@ def add_drivers(tree, fusion_ob, shapes):
             prop = 'value' if hasattr(enode, 'value') else 'color'
             for c in range(4):
                 _drive(enode, prop, sh, f'sdf_shape.emission_color[{c}]', c)
-        opn = nodes.get(f'OP_{i}')
-        if opn is not None and st.use_custom_blend:
-            _drive(opn.inputs['Blend'], 'default_value', sh, 'sdf_shape.blend')
-            _drive(opn.inputs['Steps'], 'default_value', sh, 'sdf_shape.steps')
-            custom.append(sh)
-    if custom:
-        fc = nodes['PAD_BLEND'].outputs[0].driver_add('default_value')
-        drv = fc.driver
-        drv.type = 'MAX'
-        for v in list(drv.variables):
-            drv.variables.remove(v)
-        for k, sh in enumerate(custom):
-            var = drv.variables.new()
-            var.name = f'b{k}'
-            var.type = 'SINGLE_PROP'
-            var.targets[0].id_type = 'OBJECT'
-            var.targets[0].id = sh
-            var.targets[0].data_path = 'sdf_shape.blend'
+    fc = nodes['PAD_RADIUS'].outputs[0].driver_add('default_value')
+    drv = fc.driver
+    drv.type = 'MAX'
+    for v in list(drv.variables):
+        drv.variables.remove(v)
+    for k, sh in enumerate(shapes):
+        var = drv.variables.new()
+        var.name = f'r{k}'
+        var.type = 'SINGLE_PROP'
+        var.targets[0].id_type = 'OBJECT'
+        var.targets[0].id = sh
+        var.targets[0].data_path = 'sdf_shape.radius'
 
 
 def _shape_index(fusion_ob, shape_ob):
@@ -934,16 +923,16 @@ def update_values(fusion_ob):
     if tree is None:
         return
     nodes = tree.nodes
-    needed = ('GLOBAL_BLEND', 'GLOBAL_STEPS', 'RESOLUTION', 'ADAPTIVITY', 'PAD_BLEND')
+    needed = ('GLOBAL_PARAMS', 'GLOBAL_STEPS', 'RESOLUTION', 'ADAPTIVITY', 'PAD_RADIUS')
     if any(n not in nodes for n in needed):
         if any(True for _ in iter_shapes(fusion_ob)):
             rebuild(fusion_ob)
         return
-    nodes['GLOBAL_BLEND'].outputs[0].default_value = settings.blend
+    nodes['GLOBAL_PARAMS'].vector = (settings.radius_scale, settings.fill_scale, 1.0)
     nodes['GLOBAL_STEPS'].outputs[0].default_value = float(settings.steps)
     nodes['RESOLUTION'].integer = settings.live_resolution()
     nodes['ADAPTIVITY'].outputs[0].default_value = settings.adaptivity
-    nodes['PAD_BLEND'].outputs[0].default_value = max_custom_blend(fusion_ob)
+    nodes['PAD_RADIUS'].outputs[0].default_value = max_radius(fusion_ob)
     sync_material(fusion_ob)
 
 
@@ -973,13 +962,14 @@ def update_shape_values(fusion_ob, shape_ob):
     enode = tree.nodes.get(f'EMISSION_{i}')
     if enode is not None:
         set_color_node(enode, st.emission_color)
-    opn = tree.nodes.get(f'OP_{i}')
-    if opn is not None and st.use_custom_blend:
-        opn.inputs['Blend'].default_value = st.blend
-        opn.inputs['Steps'].default_value = float(st.steps)
-    pad = tree.nodes.get('PAD_BLEND')
+    pnode = tree.nodes.get(f'PARAMS_{i}')
+    if pnode is None:
+        rebuild(fusion_ob)
+        return
+    pnode.vector = (st.radius, st.fill, 0.0)
+    pad = tree.nodes.get('PAD_RADIUS')
     if pad is not None:
-        pad.outputs[0].default_value = max_custom_blend(fusion_ob)
+        pad.outputs[0].default_value = max_radius(fusion_ob)
 
 
 def ensure_color_layer(fusion_ob):
@@ -1061,10 +1051,10 @@ def build_field_sampler(fusion_ob, sampler_ob, attribute_name='sdf'):
     gi = b.node('NodeGroupInput')
     go = b.node('NodeGroupOutput')
     shapes = list(iter_shapes(fusion_ob))
-    blend = b.value(settings.blend, 'GLOBAL_BLEND')
+    gparams = b.vector_input((settings.radius_scale, settings.fill_scale, 1.0), 'GLOBAL_PARAMS')
     steps = b.value(float(settings.steps), 'GLOBAL_STEPS')
     position = b.node('GeometryNodeInputPosition').outputs[0]
-    acc, _extras = build_field(b, fusion_ob, shapes, position, blend, steps)
+    acc, _extras = build_field(b, fusion_ob, shapes, position, gparams, steps)
     store = b.node('GeometryNodeStoreNamedAttribute')
     store.data_type = 'FLOAT'
     store.domain = 'POINT'

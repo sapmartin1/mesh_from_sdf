@@ -69,6 +69,19 @@ on your M5 Mac with Blender 5.2 and note anything that misbehaves.
 - [ ] Select one shape, Shift+D, move: the copy is part of the same fusion
       and appears in the Shapes list.
 
+## 1.4 additions
+
+- [ ] Select a shape: **Radius** and **Blend** sliders sit right under the
+      operation buttons.  Small Radius + Blend 1.0 looks like a tight bevel;
+      large Radius + Blend 0.2 is a long gentle lean; Blend 0.5 is a
+      quarter-pipe.  The ramp never bulges outward.
+- [ ] Four shapes, one delicate: lower only its Radius; its seams tighten,
+      all other seams stay as they were, whatever its position in the list.
+- [ ] Drag **Radius x** on the fusion from 0 to 2: everything melts
+      proportionally; 0 gives hard booleans.
+- [ ] Open a scene made with 1.3 or earlier: it looks the same as before and
+      the shapes now show Radius / Blend values.
+
 ## UI / workflow
 
 - [ ] Clicking a row in the *Shapes* sub-panel selects that shape.
