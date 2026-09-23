@@ -3,7 +3,7 @@
 GUI smoke test: drives the *installed* SDF Fusion extension inside a real
 Blender window and saves screenshots of every step.
 
-    # install first:  blender -b --command extension install-file --repo user_default --enable dist/sdf_fusion-1.5.0.zip
+    # install first:  blender -b --command extension install-file --repo user_default --enable dist/sdf_fusion-1.6.0.zip
     blender -b --python-expr "import bpy; bpy.ops.wm.save_as_mainfile(filepath='/tmp/sdff.blend')"
     blender /tmp/sdff.blend --python tests/gui_smoke.py -- /tmp/sdff_shots
 

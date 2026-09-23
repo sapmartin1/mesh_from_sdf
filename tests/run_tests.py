@@ -597,6 +597,34 @@ def test_mesh_shapes():
     check(result.type == 'MESH' and len(result.modifiers) == 0 and mesh_stats(result.data)['islands'] == 1, "Convert to Mesh works with editable shapes")
 
 
+def test_mirror_and_hollow():
+    print("\n[13] mirror and hollow")
+    reset_scene()
+    fusion = ops.create_fusion(C, Vector((0, 0, 0)))
+    box = ops.add_shape(C, fusion, 'BOX', Vector((1.5, 0.0, 0.0)))
+    box.scale = (0.5, 0.5, 0.5)
+    fs = fusion.sdf_fusion
+    s0 = mesh_stats(evaluated_mesh(fusion))
+    fs.mirror_x = True
+    s1 = mesh_stats(evaluated_mesh(fusion))
+    check(abs(s1['volume'] - 2 * s0['volume']) < 0.1 * s0['volume'] and s1['islands'] == 2 and s1['min'][0] < -1.9, f"Mirror X reflects the model ({s0['volume']:.3f} -> {s1['volume']:.3f}, 2 islands, min x {s1['min'][0]:.2f})")
+    fs.mirror_z = True
+    box.location.z = 1.0
+    s2 = mesh_stats(evaluated_mesh(fusion))
+    check(abs(s2['volume'] - 4 * s0['volume']) < 0.2 * s0['volume'] and s2['islands'] == 4, f"Mirror X+Z gives four copies ({s2['volume']:.3f})")
+    fs.mirror_x = False
+    fs.mirror_z = False
+    box.location = (0, 0, 0)
+    box.scale = (1, 1, 1)
+    fs.shell = 0.2
+    s3 = mesh_stats(evaluated_mesh(fusion))
+    expect = (2.4 ** 3 - 1.6 ** 3)
+    check(abs(s3['volume'] - expect) / expect < 0.05 and s3['islands'] == 2, f"Hollow 0.2 makes a wall (volume {s3['volume']:.3f} ~ {expect:.3f}, inner + outer surface)")
+    fs.shell = 0.0
+    s4 = mesh_stats(evaluated_mesh(fusion))
+    check(abs(s4['volume'] - 8.0) < 0.05 and s4['islands'] == 1, "Hollow 0 is solid again")
+
+
 def test_cutters_and_guides():
     print("\n[9] cutters always cut, guide display, Shift+D on a shape")
     reset_scene()
@@ -1095,7 +1123,7 @@ def test_timing():
 
 def main():
     t0 = time.perf_counter()
-    for test in (test_field_matches_reference, test_acceptance_flow, test_primitive_volumes, test_placement, test_mesh_shapes, test_cutters_and_guides, test_duplicate, test_animation_and_apply, test_ramp_family, test_color_blending, test_material_blending, test_timing):
+    for test in (test_field_matches_reference, test_acceptance_flow, test_primitive_volumes, test_placement, test_mesh_shapes, test_mirror_and_hollow, test_cutters_and_guides, test_duplicate, test_animation_and_apply, test_ramp_family, test_color_blending, test_material_blending, test_timing):
         try:
             t_start = time.perf_counter()
             test()

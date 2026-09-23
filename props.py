@@ -242,6 +242,13 @@ class SDFFusionSettings(PropertyGroup):
         description="Resolution of mesh shapes' distance fields relative to the fusion grid: "
                     "1 matches it, 2 is twice as fine (slower)",
         update=_fusion_values)
+    mirror_x: BoolProperty(name="X", default=False, description="Mirror the whole fusion across its local YZ plane", update=_fusion_rebuild)
+    mirror_y: BoolProperty(name="Y", default=False, description="Mirror the whole fusion across its local XZ plane", update=_fusion_rebuild)
+    mirror_z: BoolProperty(name="Z", default=False, description="Mirror the whole fusion across its local XY plane", update=_fusion_rebuild)
+    shell: FloatProperty(
+        name="Hollow", default=0.0, min=0.0, soft_max=0.5, subtype='DISTANCE',
+        description="Keep only a wall of this thickness around the fused surface (0 = solid)",
+        update=_fusion_values)
     data_version: IntProperty(default=0, options={'HIDDEN'})
     # --- legacy (pre 1.4) settings, only read once by the migration ---
     blend: FloatProperty(default=0.25, min=0.0, options={'HIDDEN'})

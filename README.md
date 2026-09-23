@@ -27,7 +27,7 @@ Blender evaluates natively on every platform.  See
 
 ## Installation
 
-1. Download `sdf_fusion-1.5.0.zip` (or build it, see below).
+1. Download `sdf_fusion-1.6.0.zip` (or build it, see below).
 2. Drag and drop the ZIP into a Blender window, or use
    *Edit > Preferences > Get Extensions > (dropdown) > Install from Disk...*
 3. Enable **SDF Fusion** if it is not enabled automatically.
@@ -67,6 +67,8 @@ SDF Fusion
     Blend x        master multiplier for every shape's Blend
     Blend Mode     Ramp / Steps / Flat Bevel
     Mesh Detail    resolution of mesh shapes' fields (shown when a mesh shape exists)
+    Mirror X Y Z   reflect the whole fusion across its own axes (model one half)
+    Hollow         keep only a wall of this thickness (0 = solid)
     Quality        Low / Medium / High / Custom     (preview resolution)
     Adaptivity     merge flat areas
     Live Update    pause the live mesh on heavy scenes

@@ -651,7 +651,7 @@ def object_info_nodes(b, shapes):
     return out
 
 
-def bounds_pipeline(b, obj_nodes, resolution, pad_radius, global_params):
+def bounds_pipeline(b, obj_nodes, resolution, pad_radius, global_params, settings):
     """Padded bounds of all shapes, the cubic voxel size, and the voxel size /
     band width used for mesh shapes' distance fields."""
     join = b.node('GeometryNodeJoinGeometry', 'BOUNDS_JOIN')
@@ -660,11 +660,13 @@ def bounds_pipeline(b, obj_nodes, resolution, pad_radius, global_params):
     bbox = b.node('GeometryNodeBoundBox')
     b.link(join.outputs[0], bbox.inputs[0])
     mn, mx = bbox.outputs['Min'], bbox.outputs['Max']
+    mn, mx = mirror_bounds(b, settings, mn, mx)
     ex, ey, ez = b.sep(b.vmath('SUBTRACT', mx, mn))
     voxel0 = b.math('DIVIDE', b.max3(ex, ey, ez), resolution)
     gscale_r, _gscale_t, _gz = b.sep(global_params)
     reach = b.math('MULTIPLY', pad_radius, gscale_r)
-    pad = b.math('ADD', reach, b.math('MULTIPLY_ADD', voxel0, 2.0, 0.001))
+    shell = b.value(settings.shell, 'SHELL')
+    pad = b.math('ADD', b.math('ADD', reach, shell), b.math('MULTIPLY_ADD', voxel0, 2.0, 0.001))
     padv = b.comb(pad, pad, pad)
     mn2 = b.vmath('SUBTRACT', mn, padv)
     mx2 = b.vmath('ADD', mx, padv)
@@ -679,6 +681,34 @@ def bounds_pipeline(b, obj_nodes, resolution, pad_radius, global_params):
     b.link(band_f, band.inputs[0])
     return {'min': mn2, 'max': mx2, 'extent': (ex2, ey2, ez2), 'voxel': voxel,
             'mesh_voxel': mesh_voxel, 'mesh_band': band.outputs[0]}
+
+
+def fold_position(b, settings, position):
+    """Mirror: evaluate the field at |x| / |y| / |z| so one side is reflected."""
+    if not (settings.mirror_x or settings.mirror_y or settings.mirror_z):
+        return position
+    x, y, z = b.sep(position)
+    if settings.mirror_x:
+        x = b.math('ABSOLUTE', x)
+    if settings.mirror_y:
+        y = b.math('ABSOLUTE', y)
+    if settings.mirror_z:
+        z = b.math('ABSOLUTE', z)
+    return b.comb(x, y, z)
+
+
+def mirror_bounds(b, settings, mn, mx):
+    """Symmetric bounds on mirrored axes."""
+    if not (settings.mirror_x or settings.mirror_y or settings.mirror_z):
+        return mn, mx
+    lo = list(b.sep(mn))
+    hi = list(b.sep(mx))
+    for i, on in enumerate((settings.mirror_x, settings.mirror_y, settings.mirror_z)):
+        if on:
+            ext = b.math('MAXIMUM', b.math('ABSOLUTE', lo[i]), b.math('ABSOLUTE', hi[i]))
+            lo[i] = b.neg(ext)
+            hi[i] = ext
+    return b.comb(*lo), b.comb(*hi)
 
 
 def build_field(b, fusion_ob, shapes, position, global_params, global_steps, obj_nodes, bounds):
@@ -801,14 +831,20 @@ def rebuild(fusion_ob):
 
     # bounds: union of the shape meshes (already in fusion-local space)
     obj_nodes = object_info_nodes(b, shapes)
-    bounds = bounds_pipeline(b, obj_nodes, resolution, pad_radius, gparams)
+    bounds = bounds_pipeline(b, obj_nodes, resolution, pad_radius, gparams, settings)
     tree.nodes['MESH_DETAIL'].outputs[0].default_value = settings.mesh_detail
     mn2, mx2 = bounds['min'], bounds['max']
     ex2, ey2, ez2 = bounds['extent']
     voxel = bounds['voxel']
 
+    position = fold_position(b, settings, position)
     acc, (acc_color, acc_surface, acc_extra, acc_emission) = build_field(
         b, fusion_ob, shapes, position, gparams, steps, obj_nodes, bounds)
+    # Hollow: keep only a wall of thickness SHELL around the surface
+    shell = tree.nodes['SHELL'].outputs[0]
+    hollow = b.math('SUBTRACT', b.math('ABSOLUTE', acc), shell)
+    on = b.math('GREATER_THAN', shell, 0.0)
+    acc = b.math('MULTIPLY_ADD', b.math('SUBTRACT', hollow, acc), on, acc)
 
     def res_axis(extent):
         f = b.math('MAXIMUM', b.math('ADD', b.math('DIVIDE', extent, voxel), 1.0), 2.0)
@@ -929,6 +965,8 @@ def add_drivers(tree, fusion_ob, shapes):
     _drive(nodes['ADAPTIVITY'].outputs[0], 'default_value', fusion_ob, 'sdf_fusion.adaptivity')
     if 'MESH_DETAIL' in nodes:
         _drive(nodes['MESH_DETAIL'].outputs[0], 'default_value', fusion_ob, 'sdf_fusion.mesh_detail')
+    if 'SHELL' in nodes:
+        _drive(nodes['SHELL'].outputs[0], 'default_value', fusion_ob, 'sdf_fusion.shell')
     for i, sh in enumerate(shapes):
         st = sh.sdf_shape
         pnode = nodes.get(f'PARAMS_{i}')
@@ -999,6 +1037,8 @@ def update_values(fusion_ob):
     nodes['PAD_RADIUS'].outputs[0].default_value = max_radius(fusion_ob)
     if 'MESH_DETAIL' in nodes:
         nodes['MESH_DETAIL'].outputs[0].default_value = settings.mesh_detail
+    if 'SHELL' in nodes:
+        nodes['SHELL'].outputs[0].default_value = settings.shell
     sync_material(fusion_ob)
 
 
@@ -1124,8 +1164,9 @@ def build_field_sampler(fusion_ob, sampler_ob, attribute_name='sdf'):
     resolution = b.integer(settings.live_resolution(), 'RESOLUTION')
     pad_radius = b.value(max_radius(fusion_ob), 'PAD_RADIUS')
     obj_nodes = object_info_nodes(b, shapes)
-    bounds = bounds_pipeline(b, obj_nodes, resolution, pad_radius, gparams)
+    bounds = bounds_pipeline(b, obj_nodes, resolution, pad_radius, gparams, settings)
     tree.nodes['MESH_DETAIL'].outputs[0].default_value = settings.mesh_detail
+    position = fold_position(b, settings, position)
     acc, _extras = build_field(b, fusion_ob, shapes, position, gparams, steps, obj_nodes, bounds)
     store = b.node('GeometryNodeStoreNamedAttribute')
     store.data_type = 'FLOAT'

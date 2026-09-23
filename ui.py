@@ -129,6 +129,12 @@ class SDFF_PT_main(Panel):
         col.prop(fs, 'adaptivity', slider=True)
         if any(r.object is not None and r.object.sdf_shape.primitive == 'MESH' for r in fs.shapes):
             col.prop(fs, 'mesh_detail', slider=True)
+        row = box.row(align=True)
+        row.label(text="Mirror")
+        row.prop(fs, 'mirror_x', toggle=True)
+        row.prop(fs, 'mirror_y', toggle=True)
+        row.prop(fs, 'mirror_z', toggle=True)
+        box.prop(fs, 'shell', slider=True)
         col.prop(fs, 'live', toggle=True, icon='PLAY' if fs.live else 'PAUSE')
         row = box.row(align=True)
         row.prop(fs, 'guide_display', expand=True)
