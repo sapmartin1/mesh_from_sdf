@@ -232,23 +232,31 @@ Deviations from upstream, on purpose:
   size, so mesh shapes' Mesh-to-SDF grids (same lattice) are sampled at
   stored voxels, not interpolated; a mesh cube now has exactly the analytic
   box's error.
-* Precise Edges (Convert): vertices are Newton-projected onto the real
-  Geometry Nodes field (evaluated through a temporary sampler object), then
-  vertices whose 1-ring normals disagree by more than 35 degrees are moved to
-  the least-squares intersection of the neighbouring tangent planes (a
-  per-vertex QEF, the dual-contouring idea), then projected once more.
-  Two lessons: the finite-difference stencil must be tiny (voxel/32) or
-  normals next to a crease straddle it and the QEF lands off the surface;
-  and mesh shapes cannot be made exact this way because their field is the
-  voxel grid itself, so the bake samples them 4x finer instead.  Result on
-  two rotated cubes: max surface error 0.027 -> 0.00006, crease vertices on
-  the true edge line 2 -> 556.
+* Precise Edges (Convert) is a dual-contouring re-mesh in numpy against the
+  real Geometry Nodes field (evaluated once per grid point through a
+  temporary sampler object): surface crossings on grid edges get normals
+  from a tiny stencil (voxel/32; a coarser one straddles creases and ruins
+  the fit), every cell gets one vertex from a least-squares fit of the
+  crossing tangent planes (QEF, clamped to its cell, then two Newton steps
+  onto the field for curved cells), and the four cells around each crossing
+  edge form a quad (ring parity differs for the Y axis).  Crease cells land
+  exactly on the crease line, corner cells on the corner, and faces never
+  straddle a crease.  Then: Smart Topology as a limited dissolve (angle =
+  12 degrees x slider), post-modifiers re-applied through a temporary
+  object, sharp edges by angle, materials and colour / surface attributes
+  copied from the nearest marching-cubes vertex.  Two rotated cubes: max
+  surface error 0.027 -> 0.0002, crease vertices on the true edge line
+  2 -> 176 (fewer vertices overall), 97.8% of faces exactly on a cube face.
+  A first attempt that only snapped marching-cubes vertices straightened the
+  crease line but left faces straddling it (dark notches); it was replaced.
+* Mesh shapes stay voxel-limited (their field is the grid); the bake samples
+  them 4x finer (mesh cube error 0.024 -> 0.005).
 * Follow-up idea: exact distances to mesh shapes' triangles (BVH) at bake
   time would make their creases exact too.
 
 ## 4. Verified
 
-* `tests/run_tests.py` on Blender 5.1.0 / macOS 26 / Apple M5: 217 checks,
+* `tests/run_tests.py` on Blender 5.1.0 / macOS 26 / Apple M5: 219 checks,
   all passing (primitive maths for all 8 primitives, all 15 operation x
   blend combinations, the Phase 1 acceptance flow, analytic volumes, colour
   and material blending, animation drivers, Apply Transform repair,

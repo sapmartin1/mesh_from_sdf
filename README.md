@@ -27,7 +27,7 @@ Blender evaluates natively on every platform.  See
 
 ## Installation
 
-1. Download `sdf_fusion-1.10.0.zip` (or build it, see below).
+1. Download `sdf_fusion-1.11.0.zip` (or build it, see below).
 2. Drag and drop the ZIP into a Blender window, or use
    *Edit > Preferences > Get Extensions > (dropdown) > Install from Disk...*
 3. Enable **SDF Fusion** if it is not enabled automatically.

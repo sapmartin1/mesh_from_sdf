@@ -1181,7 +1181,10 @@ def sample_field_at(fusion_ob, points, context=None, resolution=None, mesh_detai
     import numpy as np
     context = context or bpy.context
     me = bpy.data.meshes.new('_sdff_sampler')
-    me.from_pydata([tuple(map(float, p)) for p in points], [], [])
+    pts = np.ascontiguousarray(np.asarray(points, dtype=np.float32)).reshape(-1, 3)
+    me.vertices.add(len(pts))
+    me.vertices.foreach_set('co', pts.ravel())
+    me.update()
     ob = bpy.data.objects.new('_sdff_sampler', me)
     context.scene.collection.objects.link(ob)
     ob.matrix_world = fusion_ob.matrix_world.copy()

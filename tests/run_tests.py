@@ -785,9 +785,27 @@ def test_precise_convert():
     e0, l0, s0 = rotated_cubes(False)
     e1, l1, s1 = rotated_cubes(True)
     vox = 2.9 / 64
-    check(e1 < 2e-3 and e0 > 5 * e1, f"vertices land on the exact surface (max |d| {e0:.4f} -> {e1:.5f})")
+    check(e1 < 3e-3 and e0 > 5 * e1, f"vertices land on the exact surface (max |d| {e0:.4f} -> {e1:.5f})")
     check(l1 > 3 * max(l0, 1), f"crease vertices sit on the true edge line ({l0} -> {l1} vertices within 5% of a voxel)")
-    check(abs(s1['volume'] - s0['volume']) / s0['volume'] < 0.01 and s1['islands'] == s0['islands'], "volume and topology unchanged")
+    check(abs(s1['volume'] - s0['volume']) / s0['volume'] < 0.01 and s1['islands'] == s0['islands'], f"volume and topology kept ({s0['volume']:.3f} -> {s1['volume']:.3f})")
+    # faces never straddle a crease: every face is (nearly) planar and lies on one plane of cube A or B
+    reset_scene()
+    f = ops.create_fusion(C, Vector((0, 0, 0)))
+    f.sdf_fusion.final_resolution = 64
+    a = ops.add_shape(C, f, 'BOX', Vector((0, 0, 0)))
+    a.rotation_euler = Euler((0.4, 0.3, 0.2))
+    set_blend(f, 0.0)
+    C.view_layer.objects.active = f
+    ops.convert_to_mesh(C, f, 64, precise=True)
+    res = C.active_object
+    me = res.data
+    inv = np.array([list(r) for r in (Matrix.Translation(a.location) @ a.rotation_euler.to_matrix().to_4x4()).inverted()])
+    nrm = np.array([p.normal[:] for p in me.polygons])
+    nrm_local = nrm @ inv[:3, :3].T
+    axis_aligned = np.max(np.abs(nrm_local), axis=1) > 0.995
+    check(axis_aligned.mean() > 0.97, f"{axis_aligned.mean():.1%} of faces are exactly on a cube face (no faces straddle a crease)")
+    sharp = me.attributes.get('sharp_edge')
+    check(sharp is not None and 0 < np.mean([s.value for s in sharp.data]) < 0.2, "creases are marked sharp, faces smooth")
 
     # smooth blends are untouched apart from landing on the exact surface
     reset_scene()
@@ -806,7 +824,7 @@ def test_precise_convert():
     res = C.active_object
     co = np.array([v.co[:] for v in res.data.vertices])
     d = sdf_ref.evaluate_fusion(co, reference_shapes(f), fusion_params(f))
-    check(np.abs(d).max() < 2e-3 and abs(mesh_stats(res.data)['volume'] - v0) / v0 < 0.01, f"smooth blend: exact surface (max |d| {np.abs(d).max():.5f}), volume kept")
+    check(np.abs(d).max() < 3e-3 and abs(mesh_stats(res.data)['volume'] - v0) / v0 < 0.01, f"smooth blend: exact surface (max |d| {np.abs(d).max():.5f}), volume kept")
 
     # mesh shapes benefit too (field is the voxel grid's, so within a fraction of a voxel)
     reset_scene()

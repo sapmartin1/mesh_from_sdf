@@ -637,92 +637,224 @@ def repair_applied_transform(shape):
     return True
 
 
-def sharpen_baked_mesh(context, fusion, mesh, resolution, crease_angle=35.0, iterations=4):
-    """Make a baked mesh exact.
+def dual_contour_bake(context, fusion, guide_mesh, resolution, mesh_detail=None):
+    """Re-mesh the fusion with dual contouring so hard edges come out exact.
 
-    Grid extraction only places vertices within half a voxel of the surface,
-    which turns sharp creases into staircases.  Step 1 projects every vertex
-    onto the true zero surface of the fusion's field (Newton steps against the
-    real Geometry Nodes field).  Step 2 finds vertices whose neighbourhood
-    normals disagree (creases, corners) and moves them to the point that best
-    satisfies all neighbouring tangent planes (a small QEF, the dual-contouring
-    idea), which puts them exactly on the crease line.
+    Grid extraction (marching cubes) puts vertices on grid edges, which turns
+    creases into staircases and makes faces straddle them.  Dual contouring
+    instead places ONE vertex per grid cell at the point that best satisfies
+    the tangent planes of the surface crossings on that cell's edges (a small
+    least-squares / QEF), and connects the vertices of the four cells around
+    every crossing edge into a quad.  A crease cell's planes intersect in a
+    line, so its vertex lands exactly on the crease; a corner cell's vertex
+    lands exactly on the corner; smooth cells land on the surface.  Faces
+    never straddle a crease.  The field is the real Geometry Nodes field
+    (mesh shapes sampled finer), evaluated once per grid point.
     """
-    n = len(mesh.vertices)
-    if n == 0:
-        return 0
-    co = np.empty(n * 3)
-    mesh.vertices.foreach_get('co', co)
-    co = co.reshape(-1, 3)
-    ext = co.max(axis=0) - co.min(axis=0)
-    voxel = float(ext.max()) / max(1, int(resolution))
-    # a tiny stencil: normals sampled next to a crease must not straddle it
-    h = voxel / 32.0
-    offsets = np.array([[h, 0, 0], [-h, 0, 0], [0, h, 0], [0, -h, 0], [0, 0, h], [0, 0, -h]])
-    max_step = 1.5 * voxel
+    vox = np.empty(len(guide_mesh.vertices) * 3)
+    guide_mesh.vertices.foreach_get('co', vox)
+    vox = vox.reshape(-1, 3)
+    if len(vox) == 0:
+        return None
+    lo, hi = vox.min(axis=0), vox.max(axis=0)
+    ext = float((hi - lo).max())
+    h = ext / max(8, int(resolution))
+    margin = 3.0 * h
+    lo = lo - margin
+    dims = np.ceil((hi + margin - lo) / h).astype(int) + 2
+    nx, ny, nz = (int(v) for v in dims)
+    if nx * ny * nz > 40_000_000:
+        return None                                   # far too large, keep marching cubes
+    detail = mesh_detail if mesh_detail is not None else min(8.0, max(1.0, round(fusion.sdf_fusion.mesh_detail)) * 4.0)
 
-    # mesh shapes are only as exact as their voxel field: sample them 4x finer for the bake
-    detail = min(8.0, max(1.0, round(fusion.sdf_fusion.mesh_detail)) * 4.0)
+    def field(p):
+        return nodes.sample_field_at(fusion, p, context, resolution, detail)
 
-    def field_and_grad(p):
-        pts = np.concatenate([p] + [p + o for o in offsets])
-        vals = nodes.sample_field_at(fusion, pts, context, resolution, detail).reshape(7, n)
-        g = np.stack([vals[1] - vals[2], vals[3] - vals[4], vals[5] - vals[6]], axis=1) / (2.0 * h)
-        return vals[0], g
+    # 1. field at every grid point
+    gx, gy, gz = np.meshgrid(np.arange(nx), np.arange(ny), np.arange(nz), indexing='ij')
+    grid_pts = lo + np.stack([gx, gy, gz], axis=-1).reshape(-1, 3) * h
+    d = field(grid_pts).reshape(nx, ny, nz)
 
-    def project(p, rounds):
-        for _ in range(rounds):
-            d, g = field_and_grad(p)
-            g2 = np.maximum(np.sum(g * g, axis=1), 1e-12)
-            step = (d / g2)[:, None] * g
-            ln = np.linalg.norm(step, axis=1)
-            step *= np.minimum(1.0, max_step / np.maximum(ln, 1e-12))[:, None]
-            p = p - step
-        return p
-
-    # 1. project onto the exact surface
-    co = project(co, iterations)
-    d, g = field_and_grad(co)
-    nrm = g / np.maximum(np.linalg.norm(g, axis=1), 1e-12)[:, None]
-
-    # 2. crease vertices onto the crease line
-    ne = len(mesh.edges)
-    ev = np.empty(ne * 2, dtype=np.int64)
-    mesh.edges.foreach_get('vertices', ev)
-    ev = ev.reshape(-1, 2)
-    src = np.concatenate([ev[:, 0], ev[:, 1]])
-    dst = np.concatenate([ev[:, 1], ev[:, 0]])
-    order = np.argsort(src, kind='stable')
-    src, dst = src[order], dst[order]
-    starts = np.searchsorted(src, np.arange(n + 1))
-    dots = np.sum(nrm[src] * nrm[dst], axis=1)
-    min_dot = np.full(n, 1.0)
-    np.minimum.at(min_dot, src, dots)
-    crease = np.nonzero(min_dot < math.cos(math.radians(crease_angle)))[0]
-    lam = 0.05
-    moved = 0
-    for i in crease:
-        idx = np.concatenate([[i], dst[starts[i]:starts[i + 1]]])
-        N = nrm[idx]
-        P = co[idx]
-        A = N.T @ N + lam * np.eye(3)
-        rhs = N.T @ np.sum(N * P, axis=1) + lam * co[i]
-        try:
-            x = np.linalg.solve(A, rhs)
-        except np.linalg.LinAlgError:
+    # 2. surface crossings on grid edges (x, y, z directions)
+    cross_pts, cross_cells = [], []
+    quads = []
+    for axis in range(3):
+        a = d
+        b = np.roll(d, -1, axis=axis)
+        sl = [slice(None)] * 3
+        sl[axis] = slice(0, -1)
+        a, b = a[tuple(sl)], b[tuple(sl)]
+        change = (a < 0) != (b < 0)
+        idx = np.argwhere(change)                      # edge start grid index (i, j, k)
+        if len(idx) == 0:
             continue
-        delta = x - co[i]
-        ln = float(np.linalg.norm(delta))
-        if ln > max_step:
-            delta *= max_step / ln
-        co[i] = co[i] + delta
-        moved += 1
-    # 3. the snapped vertices sit on the crease line; make sure every vertex is
-    # exactly on the surface again (no-op for those already on it)
-    co = project(co, 2)
-    mesh.vertices.foreach_set('co', co.ravel())
+        da, db = a[change], b[change]
+        t = da / (da - db)
+        p = lo + idx * h
+        p[:, axis] += t * h
+        cross_pts.append(p)
+        # the four cells sharing this edge: cell (i,j,k) spans grid points i..i+1
+        o1, o2 = [ax for ax in range(3) if ax != axis]
+        cells = np.repeat(idx[:, None, :], 4, axis=1).copy()
+        shifts = [(0, 0), (-1, 0), (-1, -1), (0, -1)]
+        for q, (s1, s2) in enumerate(shifts):
+            cells[:, q, o1] += s1
+            cells[:, q, o2] += s2
+        cross_cells.append(cells)
+        # winding: the cell ring (o1, o2) is right-handed about x and z but
+        # left-handed about y; flip that, and flip when the field increases
+        flip = (da < 0) ^ (axis == 1)
+        quads.append((cells, flip))
+    if not cross_pts:
+        return None
+    P = np.concatenate(cross_pts)
+    C = np.concatenate(cross_cells)                    # (m, 4, 3) cell indices per crossing
+    # 3. normals at the crossings (tiny stencil so creases are not smeared)
+    eps = h / 32.0
+    offs = np.array([[eps, 0, 0], [-eps, 0, 0], [0, eps, 0], [0, -eps, 0], [0, 0, eps], [0, 0, -eps]])
+    vals = field(np.concatenate([P + o for o in offs])).reshape(6, -1)
+    N = np.stack([vals[0] - vals[1], vals[2] - vals[3], vals[4] - vals[5]], axis=1) / (2.0 * eps)
+    N /= np.maximum(np.linalg.norm(N, axis=1), 1e-12)[:, None]
+
+    # 4. one vertex per cell: QEF over the crossings on its edges
+    cid = (C[..., 0] * ny + C[..., 1]) * nz + C[..., 2]           # (m, 4)
+    valid = (C >= 0).all(axis=-1) & (C[..., 0] < nx - 1) & (C[..., 1] < ny - 1) & (C[..., 2] < nz - 1)
+    flat_cid = cid[valid]
+    Pm = np.repeat(P[:, None, :], 4, axis=1)[valid]
+    Nm = np.repeat(N[:, None, :], 4, axis=1)[valid]
+    uniq, inv = np.unique(flat_cid, return_inverse=True)
+    ncell = len(uniq)
+    A = np.zeros((ncell, 3, 3))
+    bvec = np.zeros((ncell, 3))
+    mass = np.zeros((ncell, 3))
+    cnt = np.zeros(ncell)
+    np.add.at(A, inv, Nm[:, :, None] * Nm[:, None, :])
+    np.add.at(bvec, inv, Nm * np.sum(Nm * Pm, axis=1)[:, None])
+    np.add.at(mass, inv, Pm)
+    np.add.at(cnt, inv, 1.0)
+    mass /= cnt[:, None]
+    lam = 0.02
+    A += lam * np.eye(3)[None]
+    bvec += lam * mass
+    V = np.linalg.solve(A, bvec[..., None])[..., 0]
+    # keep every vertex inside its cell (guards against ill-conditioned fits)
+    ci = np.stack([uniq // (ny * nz), (uniq // nz) % ny, uniq % nz], axis=1)
+    cmin = lo + ci * h
+    V = np.minimum(np.maximum(V, cmin - 0.05 * h), cmin + 1.05 * h)
+    # tangent-plane fits sit O(h^2) off curved surfaces: two Newton steps onto
+    # the real field (a no-op for crease / corner vertices already on it)
+    for _ in range(2):
+        vals = field(np.concatenate([V] + [V + o for o in offs])).reshape(7, -1)
+        g = np.stack([vals[1] - vals[2], vals[3] - vals[4], vals[5] - vals[6]], axis=1) / (2.0 * eps)
+        g2 = np.maximum(np.sum(g * g, axis=1), 1e-12)
+        step = (vals[0] / g2)[:, None] * g
+        ln = np.linalg.norm(step, axis=1)
+        step *= np.minimum(1.0, (0.75 * h) / np.maximum(ln, 1e-12))[:, None]
+        V = V - step
+
+    # 5. quads: the vertices of the four cells around each crossing edge
+    lookup = {int(c): i for i, c in enumerate(uniq)}
+    faces = []
+    for cells, flip in quads:
+        ids = (cells[..., 0] * ny + cells[..., 1]) * nz + cells[..., 2]
+        ok = (cells >= 0).all(axis=-1).all(axis=-1) & (cells[..., 0] < nx - 1).all(axis=-1) \
+            & (cells[..., 1] < ny - 1).all(axis=-1) & (cells[..., 2] < nz - 1).all(axis=-1)
+        for row, fl in zip(ids[ok], flip[ok]):
+            q = [lookup[int(v)] for v in row]
+            if len(set(q)) < 4:
+                continue
+            faces.append(q if fl else q[::-1])
+    if not faces:
+        return None
+    mesh = bpy.data.meshes.new(guide_mesh.name)
+    mesh.from_pydata([tuple(map(float, v)) for v in V], [], faces)
+    mesh.validate(verbose=False)
     mesh.update()
-    return moved
+    # 6. colours / surface values: nearest vertex of the marching-cubes mesh
+    from mathutils.kdtree import KDTree
+    src_attrs = [a for a in guide_mesh.attributes if a.domain == 'POINT' and a.data_type in {'FLOAT_COLOR', 'FLOAT_VECTOR', 'FLOAT'}
+                 and not a.name.startswith('.') and a.name not in {'position'}]
+    if src_attrs and len(guide_mesh.vertices):
+        kd = KDTree(len(guide_mesh.vertices))
+        for i, v in enumerate(guide_mesh.vertices):
+            kd.insert(v.co, i)
+        kd.balance()
+        nearest = np.array([kd.find(tuple(v))[1] for v in V], dtype=np.int64)
+        for a in src_attrs:
+            comps = {'FLOAT_COLOR': 4, 'FLOAT_VECTOR': 3, 'FLOAT': 1}[a.data_type]
+            key = {'FLOAT_COLOR': 'color', 'FLOAT_VECTOR': 'vector', 'FLOAT': 'value'}[a.data_type]
+            buf = np.empty(len(guide_mesh.vertices) * comps)
+            a.data.foreach_get(key, buf)
+            buf = buf.reshape(-1, comps)[nearest]
+            na = mesh.attributes.new(a.name, a.data_type, 'POINT')
+            na.data.foreach_set(key, buf.ravel())
+        if nodes.COLOR_ATTRIBUTE in mesh.color_attributes:
+            mesh.color_attributes.active_color = mesh.color_attributes[nodes.COLOR_ATTRIBUTE]
+    if len(guide_mesh.polygons) and len(guide_mesh.materials):
+        mi = np.empty(len(guide_mesh.polygons), dtype=np.int32)
+        guide_mesh.polygons.foreach_get('material_index', mi)
+        used = np.bincount(mi).argmax()
+        if used < len(guide_mesh.materials) and guide_mesh.materials[used] is not None:
+            mesh.materials.append(guide_mesh.materials[used])
+    # Smart Topology: merge coplanar / nearly coplanar faces into larger polygons
+    if fusion.sdf_fusion.adaptivity > 0.0:
+        import bmesh as _bm
+        bm = _bm.new()
+        bm.from_mesh(mesh)
+        bm.normal_update()
+        _bm.ops.dissolve_limit(bm, angle_limit=math.radians(12.0 * fusion.sdf_fusion.adaptivity),
+                               use_dissolve_boundaries=False, verts=bm.verts, edges=bm.edges)
+        bm.to_mesh(mesh)
+        bm.free()
+        mesh.update()
+    # shading: smooth faces, sharp creases by angle (same rule as the live mesh)
+    smooth = np.ones(len(mesh.polygons), dtype=bool)
+    mesh.polygons.foreach_set('use_smooth', smooth)
+    fs = fusion.sdf_fusion
+    if fs.shading == 'FLAT':
+        mesh.polygons.foreach_set('use_smooth', np.zeros(len(mesh.polygons), dtype=bool))
+    elif fs.shading == 'AUTO':
+        import bmesh as _bm
+        bm = _bm.new()
+        bm.from_mesh(mesh)
+        bm.normal_update()
+        thr = math.cos(fs.smooth_angle)
+        for e in bm.edges:
+            if len(e.link_faces) == 2 and e.link_faces[0].normal.dot(e.link_faces[1].normal) < thr:
+                e.smooth = False
+        bm.to_mesh(mesh)
+        bm.free()
+    mesh.update()
+    return mesh
+
+
+def _copy_modifier(src, dst_ob):
+    nm = dst_ob.modifiers.new(src.name, src.type)
+    for p in src.bl_rna.properties:
+        if p.is_readonly or p.identifier in {'rna_type', 'name', 'type'}:
+            continue
+        try:
+            setattr(nm, p.identifier, getattr(src, p.identifier))
+        except Exception:
+            pass
+    return nm
+
+
+def apply_post_modifiers(context, fusion, mesh):
+    """Run the fusion's post-modifiers (Twist, Smooth, ...) on a baked mesh."""
+    mods = [m for m in post_modifiers(fusion) if m.show_viewport]
+    if not mods:
+        return mesh
+    tmp = bpy.data.objects.new('_sdff_bake', mesh)
+    context.scene.collection.objects.link(tmp)
+    tmp.matrix_world = fusion.matrix_world.copy()
+    for m in mods:
+        _copy_modifier(m, tmp)
+    dg = context.evaluated_depsgraph_get()
+    out = bpy.data.meshes.new_from_object(tmp.evaluated_get(dg), preserve_all_data_layers=True, depsgraph=dg)
+    bpy.data.objects.remove(tmp, do_unlink=True)
+    bpy.data.meshes.remove(mesh)
+    return out
 
 
 def convert_to_mesh(context, fusion, resolution, keep_setup=True, hide_setup=True, precise=None):
@@ -730,7 +862,10 @@ def convert_to_mesh(context, fusion, resolution, keep_setup=True, hide_setup=Tru
     if precise is None:
         precise = fusion.sdf_fusion.precise_convert
     if precise:
-        sharpen_baked_mesh(context, fusion, mesh, resolution)
+        exact = dual_contour_bake(context, fusion, mesh, resolution)
+        if exact is not None:
+            bpy.data.meshes.remove(mesh)
+            mesh = apply_post_modifiers(context, fusion, exact)
     _strip_empty_material_slots(mesh)
     mesh.name = f"{fusion.name} Mesh"
     result = bpy.data.objects.new(f"{fusion.name} Mesh", mesh)
