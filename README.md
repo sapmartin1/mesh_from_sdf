@@ -27,7 +27,7 @@ Blender evaluates natively on every platform.  See
 
 ## Installation
 
-1. Download `sdf_fusion-1.6.0.zip` (or build it, see below).
+1. Download `sdf_fusion-1.7.0.zip` (or build it, see below).
 2. Drag and drop the ZIP into a Blender window, or use
    *Edit > Preferences > Get Extensions > (dropdown) > Install from Disk...*
 3. Enable **SDF Fusion** if it is not enabled automatically.
@@ -141,6 +141,16 @@ faces), or the field is unreliable and the panel warns; and mesh fields are
 voxel based, so **Mesh Detail** in the fusion box raises their resolution
 when you need crisper edges (at some cost in speed).  Because the geometry
 is used as is, Apply Scale / Rotation on a mesh shape is simply allowed.
+
+### Modifiers without converting
+
+The fusion is a real mesh object, so the **Modifiers** sub-panel adds
+Twist / Bend, Smooth, Subdivision, Remesh, Displace, Decimate, Solidify or
+Array after the SDF Fusion modifier.  They apply live to the fused mesh,
+their settings live in the Modifier tab, and **Convert to Mesh** bakes them.
+The SDF Fusion modifier is always kept first.  Modifiers on a *Mesh* shape
+feed that shape's field instead (a Subdivision on an imported object smooths
+its distance field).
 
 ### Materials
 

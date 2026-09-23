@@ -6,7 +6,7 @@ import math
 import bmesh
 import bpy
 import numpy as np
-from bpy.props import BoolProperty, EnumProperty
+from bpy.props import BoolProperty, EnumProperty, StringProperty
 from bpy.types import Operator
 from mathutils import Matrix, Vector
 
@@ -934,6 +934,92 @@ class SDFF_OT_setup_color_material(Operator):
         return {'FINISHED'}
 
 
+MODIFIER_PRESETS = (
+    ('SIMPLE_DEFORM', 'Twist / Bend', 'Simple Deform: twist, bend, taper or stretch the whole fused mesh', 'MOD_SIMPLEDEFORM', 0),
+    ('SMOOTH', 'Smooth', 'Smooth the fused surface', 'MOD_SMOOTH', 1),
+    ('SUBSURF', 'Subdivision', 'Subdivision Surface for a softer, denser mesh', 'MOD_SUBSURF', 2),
+    ('REMESH', 'Remesh', 'Voxel remesh for even, clean topology', 'MOD_REMESH', 3),
+    ('DISPLACE', 'Displace', 'Texture-driven surface detail (noise, bumps)', 'MOD_DISPLACE', 4),
+    ('DECIMATE', 'Decimate', 'Reduce the polygon count', 'MOD_DECIM', 5),
+    ('SOLIDIFY', 'Solidify', 'Give the surface a thickness (mesh-based alternative to Hollow)', 'MOD_SOLIDIFY', 6),
+    ('ARRAY', 'Array', 'Repeat the fused mesh', 'MOD_ARRAY', 7),
+)
+
+
+def add_post_modifier(fusion, mtype):
+    """Add a modifier after the SDF Fusion modifier with sensible defaults."""
+    names = {t[0]: t[1] for t in MODIFIER_PRESETS}
+    mod = fusion.modifiers.new(names.get(mtype, mtype.title()), mtype)
+    if mtype == 'SIMPLE_DEFORM':
+        mod.deform_method = 'TWIST'
+        mod.angle = 0.5
+    elif mtype == 'SMOOTH':
+        mod.factor = 0.5
+        mod.iterations = 5
+    elif mtype == 'SUBSURF':
+        mod.levels = 1
+        mod.render_levels = 2
+    elif mtype == 'REMESH':
+        mod.mode = 'VOXEL'
+        mod.voxel_size = 0.05
+    elif mtype == 'DISPLACE':
+        tex = bpy.data.textures.get('SDF Fusion Displace') or bpy.data.textures.new('SDF Fusion Displace', 'CLOUDS')
+        tex.noise_scale = 0.4
+        mod.texture = tex
+        mod.strength = 0.1
+        mod.texture_coords = 'LOCAL'
+    elif mtype == 'DECIMATE':
+        mod.ratio = 0.3
+    elif mtype == 'SOLIDIFY':
+        mod.thickness = 0.05
+    elif mtype == 'ARRAY':
+        mod.count = 2
+    sdf = fusion.modifiers.find(nodes.MODIFIER_NAME)
+    if sdf > 0:
+        fusion.modifiers.move(sdf, 0)
+    return mod
+
+
+def post_modifiers(fusion):
+    return [m for m in fusion.modifiers if m.name != nodes.MODIFIER_NAME]
+
+
+class SDFF_OT_add_modifier(Operator):
+    bl_idname = "sdf_fusion.add_modifier"
+    bl_label = "Add Modifier"
+    bl_description = "Add a modifier that post-processes the live fused mesh (no conversion needed; Convert bakes it)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    type: EnumProperty(name="Type", items=MODIFIER_PRESETS, default='SIMPLE_DEFORM')
+
+    @classmethod
+    def poll(cls, context):
+        return find_fusion(context) is not None
+
+    def execute(self, context):
+        fusion = find_fusion(context)
+        mod = add_post_modifier(fusion, self.type)
+        self.report({'INFO'}, f"{mod.name} added after SDF Fusion; edit it in the Modifier tab of {fusion.name}")
+        return {'FINISHED'}
+
+
+class SDFF_OT_remove_modifier(Operator):
+    bl_idname = "sdf_fusion.remove_modifier"
+    bl_label = "Remove Modifier"
+    bl_description = "Remove this modifier from the fusion"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    name: StringProperty()
+
+    def execute(self, context):
+        fusion = find_fusion(context)
+        mod = fusion.modifiers.get(self.name) if fusion else None
+        if mod is None or mod.name == nodes.MODIFIER_NAME:
+            return {'CANCELLED'}
+        fusion.modifiers.remove(mod)
+        return {'FINISHED'}
+
+
 class SDFF_OT_convert(Operator):
     bl_idname = "sdf_fusion.convert"
     bl_label = "Convert to Mesh"
@@ -974,6 +1060,8 @@ classes = (
     SDFF_OT_show_setup,
     SDFF_OT_color_from_material,
     SDFF_OT_setup_color_material,
+    SDFF_OT_add_modifier,
+    SDFF_OT_remove_modifier,
     SDFF_OT_convert,
 )
 

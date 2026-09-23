@@ -926,6 +926,10 @@ def rebuild(fusion_ob):
     add_drivers(tree, fusion_ob, shapes)
     mod = get_modifier(fusion_ob)
     mod.show_viewport = settings.live
+    # the SDF modifier must generate the mesh first; any others post-process it
+    idx = fusion_ob.modifiers.find(mod.name)
+    if idx > 0:
+        fusion_ob.modifiers.move(idx, 0)
     return tree
 
 

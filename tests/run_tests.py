@@ -625,6 +625,45 @@ def test_mirror_and_hollow():
     check(abs(s4['volume'] - 8.0) < 0.05 and s4['islands'] == 1, "Hollow 0 is solid again")
 
 
+def test_post_modifiers():
+    print("\n[14] modifiers on the live fusion, without converting")
+    reset_scene()
+    fusion = ops.create_fusion(C, Vector((0, 0, 0)))
+    box = ops.add_shape(C, fusion, 'BOX', Vector((0, 0, 0)))
+    sph = ops.add_shape(C, fusion, 'SPHERE', Vector((1.2, 0, 0.6)))
+    C.view_layer.objects.active = sph
+    before = mesh_stats(evaluated_mesh(fusion))
+    bpy.ops.sdf_fusion.add_modifier(type='SIMPLE_DEFORM')
+    names = [m.name for m in fusion.modifiers]
+    check(names[0] == nodes.MODIFIER_NAME and names[1] == 'Twist / Bend', f"modifier added after SDF Fusion ({names})")
+    fusion.modifiers['Twist / Bend'].angle = 1.2
+    after = mesh_stats(evaluated_mesh(fusion))
+    check(after['verts'] == before['verts'] and abs(after['min'][1] - before['min'][1]) > 0.1, "Twist deforms the live fused mesh without converting")
+    fusion.modifiers['Twist / Bend'].show_viewport = False
+    check(abs(mesh_stats(evaluated_mesh(fusion))['min'][1] - before['min'][1]) < 1e-4, "toggling the modifier off restores the plain fusion")
+    fusion.modifiers['Twist / Bend'].show_viewport = True
+    bpy.ops.sdf_fusion.add_modifier(type='SMOOTH')
+    bpy.ops.sdf_fusion.add_modifier(type='DISPLACE')
+    check([m.type for m in fusion.modifiers] == ['NODES', 'SIMPLE_DEFORM', 'SMOOTH', 'DISPLACE'], "several modifiers stack in order")
+    # a modifier dragged above SDF Fusion is put back below it on rebuild
+    fusion.modifiers.move(1, 0)
+    nodes.rebuild(fusion)
+    check(fusion.modifiers[0].name == nodes.MODIFIER_NAME, "SDF Fusion modifier is kept first")
+    sph.location.x += 0.5
+    moved = mesh_stats(evaluated_mesh(fusion))
+    check(moved['max'][0] > after['max'][0] + 0.3, "moving a shape still updates through the modifier stack")
+    fs = fusion.sdf_fusion
+    bpy.ops.sdf_fusion.convert()
+    result = C.active_object
+    check(len(result.modifiers) == 0 and abs(mesh_stats(result.data)['min'][1] - before['min'][1]) > 0.1, "Convert bakes the modifiers into the final mesh")
+    fusion.hide_set(False)
+    C.view_layer.objects.active = fusion
+    bpy.ops.sdf_fusion.remove_modifier(name='Smooth')
+    check([m.type for m in fusion.modifiers] == ['NODES', 'SIMPLE_DEFORM', 'DISPLACE'], "remove_modifier removes one modifier")
+    bpy.ops.sdf_fusion.remove_modifier(name=nodes.MODIFIER_NAME)
+    check(fusion.modifiers.get(nodes.MODIFIER_NAME) is not None, "the SDF Fusion modifier itself cannot be removed this way")
+
+
 def test_cutters_and_guides():
     print("\n[9] cutters always cut, guide display, Shift+D on a shape")
     reset_scene()
@@ -1123,7 +1162,7 @@ def test_timing():
 
 def main():
     t0 = time.perf_counter()
-    for test in (test_field_matches_reference, test_acceptance_flow, test_primitive_volumes, test_placement, test_mesh_shapes, test_mirror_and_hollow, test_cutters_and_guides, test_duplicate, test_animation_and_apply, test_ramp_family, test_color_blending, test_material_blending, test_timing):
+    for test in (test_field_matches_reference, test_acceptance_flow, test_primitive_volumes, test_placement, test_mesh_shapes, test_mirror_and_hollow, test_post_modifiers, test_cutters_and_guides, test_duplicate, test_animation_and_apply, test_ramp_family, test_color_blending, test_material_blending, test_timing):
         try:
             t_start = time.perf_counter()
             test()

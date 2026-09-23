@@ -188,6 +188,43 @@ class SDFF_PT_shape_material(Panel):
         col.prop(st, 'emission_strength')
 
 
+class SDFF_PT_modifiers(Panel):
+    bl_label = "Modifiers"
+    bl_idname = "SDFF_PT_modifiers"
+    bl_parent_id = "SDFF_PT_main"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "SDF Fusion"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return ops.find_fusion(context) is not None
+
+    def draw(self, context):
+        layout = self.layout
+        fusion = ops.find_fusion(context)
+        layout.label(text="Applied live to the fused mesh, no conversion needed", icon='INFO')
+        col = layout.column(align=True)
+        for i in range(0, len(ops.MODIFIER_PRESETS), 2):
+            row = col.row(align=True)
+            for ident, label, _d, icon, _n in ops.MODIFIER_PRESETS[i:i + 2]:
+                row.operator('sdf_fusion.add_modifier', text=label, icon=icon).type = ident
+        mods = ops.post_modifiers(fusion)
+        if mods:
+            layout.separator()
+            box = layout.box()
+            for mod in mods:
+                row = box.row(align=True)
+                row.prop(mod, 'show_viewport', text="")
+                row.label(text=mod.name, icon='MODIFIER')
+                row.operator('sdf_fusion.remove_modifier', text="", icon='X').name = mod.name
+            box.label(text=f"Settings: Modifier tab of {fusion.name}", icon='PROPERTIES')
+        shape = ops.active_shape(context)
+        if shape is not None and shape.sdf_shape.primitive == 'MESH':
+            layout.label(text="Modifiers on a Mesh shape feed its field too", icon='EDITMODE_HLT')
+
+
 class SDFF_PT_shapes(Panel):
     bl_label = "Shapes"
     bl_idname = "SDFF_PT_shapes"
@@ -222,7 +259,7 @@ class SDFF_PT_shapes(Panel):
             layout.label(text="Shapes are combined strictly top to bottom", icon='INFO')
 
 
-classes = (SDFF_UL_shapes, SDFF_PT_main, SDFF_PT_shape_material, SDFF_PT_shapes)
+classes = (SDFF_UL_shapes, SDFF_PT_main, SDFF_PT_shape_material, SDFF_PT_modifiers, SDFF_PT_shapes)
 
 
 def register():
