@@ -27,7 +27,7 @@ Blender evaluates natively on every platform.  See
 
 ## Installation
 
-1. Download `sdf_fusion-1.12.0.zip` (or build it, see below).
+1. Download `sdf_fusion-1.13.0.zip` (or build it, see below).
 2. Drag and drop the ZIP into a Blender window, or use
    *Edit > Preferences > Get Extensions > (dropdown) > Install from Disk...*
 3. Enable **SDF Fusion** if it is not enabled automatically.
@@ -42,7 +42,11 @@ To build the ZIP yourself:
 
 ## Usage
 
-The sidebar tab is the whole interface:
+Everything is also where Blender users expect it: the **Object** tab of the
+Properties editor shows a shape's SDF settings (or a fusion's), the
+**Modifier** tab of a fusion shows its settings above the modifier stack,
+shapes are in **Shift+A > SDF Fusion**, and the object right-click menu has an
+**SDF Fusion** entry.  The sidebar tab gathers it all in one place:
 
 ```
 SDF Fusion
@@ -73,7 +77,7 @@ SDF Fusion
     Quality        Low / Medium / High / Custom     (preview resolution)
     Smart Topology polygons only where the surface curves (flat = few, seams = dense)
     Live Update    pause the live mesh on heavy scenes
-    Shading        Auto Smooth (creases sharp, blends smooth) / Smooth / Flat
+    Shading        Exact (normals from the field) / Auto Smooth / Smooth / Flat
     Blend Materials  per-shape colour and surface values that cross-fade
     Material         the fusion's material
     (duplicate icon) copy the fusion with all its shapes
@@ -152,20 +156,26 @@ is used as is, Apply Scale / Rotation on a mesh shape is simply allowed.
 ### Why edges can look wavy, and what fixes it
 
 The live mesh is extracted from a voxel grid, so a sharp crease is a tiny
-staircase (up to half a voxel).  Smooth shading across that staircase looks
-like wrinkles; **Shading: Auto Smooth** (default) shades creases sharp and
-blends smooth, which removes the effect.  Higher **Quality** shrinks the
-steps.  **Precise Edges** on Convert makes hard edges of primitives exactly
-straight.  Mesh shapes are limited by their own voxel field: raise **Mesh
-Detail** (the precise bake samples them four times finer automatically).
+staircase (up to half a voxel).  What you *see*, though, is mostly shading:
+smooth shading turns the staircase into wavy bands, angle-based sharp
+edges turn it into a saw-tooth.  **Shading: Exact** (default) takes the
+normals from the distance field itself, so flat faces shade perfectly flat
+and creases stay crisp at any Quality; only the silhouette still shows the
+grid at low Quality.  Higher **Quality** shrinks the steps, and **Precise
+Edges** on Convert makes hard edges exactly straight.  Mesh shapes are
+limited by their own voxel field: raise **Mesh Detail** (the precise bake
+samples them four times finer automatically).
 
 ### Modifiers without converting
 
-The fusion is a real mesh object, so the **Modifiers** sub-panel adds
-Twist / Bend, Smooth, Subdivision, Remesh, Displace, Decimate, Solidify or
-Array after the SDF Fusion modifier.  They apply live to the fused mesh,
-their settings live in the Modifier tab, and **Convert to Mesh** bakes them.
-The SDF Fusion modifier is always kept first.  Modifiers on a *Mesh* shape
+The fusion is a real mesh object, so any Blender modifier added to it
+post-processes the fused mesh live, and **Convert to Mesh** bakes it.  The
+**Modifiers** sub-panel adds common ones (Twist / Bend, Smooth,
+Subdivision, Remesh, Displace, Decimate, Solidify, Array); adding one
+selects the fusion object and opens its **Modifier tab**, which is where you
+edit the modifier with Blender's normal UI.  Note the modifiers belong to
+the fusion object, not to the shape you happened to have selected.  The SDF
+Fusion modifier is always kept first.  Modifiers on a *Mesh* shape
 feed that shape's field instead (a Subdivision on an imported object smooths
 its distance field).
 

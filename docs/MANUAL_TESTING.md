@@ -99,9 +99,10 @@ on your M5 Mac with Blender 5.2 and note anything that misbehaves.
 
 ## 1.10 additions (straight edges)
 
-- [ ] Rotate a box shape 30 degrees: with Shading Auto Smooth its creases
-      look crisp in the viewport, no wavy dark bands.  Switch Shading to
-      Smooth to see the old look.
+- [ ] Rotate a box shape 30 degrees, pull one corner in Edit Mode: with
+      Shading Exact (default) every face shades perfectly flat and the
+      creases are crisp lines, at Low quality too.  Switch Shading to Smooth
+      or Auto Smooth to see the old wavy / saw-tooth looks.
 - [ ] Convert with Precise Edges on: in Edit Mode the crease vertices lie on
       a perfectly straight line; with it off they zig-zag.
 
@@ -110,6 +111,15 @@ on your M5 Mac with Blender 5.2 and note anything that misbehaves.
 - [ ] Add a Cylinder (primitive), Tab, select the top cap, S 1.8: the fused
       cylinder flares live and the shape box now says "Editable mesh".
       Set Primitive back to Cylinder: exact again.
+
+## 1.13 additions (native placement)
+
+- [ ] With a shape selected, Properties > Object tab shows "SDF Shape";
+      with the fusion selected it shows "SDF Fusion", and the Modifier tab
+      shows the SDF Fusion panel above the modifier stack.
+- [ ] Modifiers sub-panel > Twist / Bend: the fusion becomes active and the
+      Properties editor jumps to its Modifier tab with Twist / Bend open.
+- [ ] Right-click an object in the viewport: SDF Fusion submenu.
 
 ## UI / workflow
 

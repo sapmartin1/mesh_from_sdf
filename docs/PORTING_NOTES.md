@@ -266,9 +266,37 @@ Deviations from upstream, on purpose:
 * `__init__.py` reloads its submodules on Blender's in-place reload, so
   disable/enable or Install from Disk picks up new code without a restart.
 
+## 3h. 1.13.0: native placement of the UI
+
+* Martin added a modifier from the sidebar while a shape was selected, then
+  looked for it in the Properties editor, which showed the shape's empty
+  stack: the modifiers live on the fusion object.  Adding one now selects
+  the fusion, expands that modifier and switches the Properties editor to
+  the Modifier tab; each row in the Modifiers sub-panel has an edit button.
+* The shape and fusion settings are drawn by shared functions and also
+  appear in the Properties editor: SDF Shape / SDF Fusion panels in the
+  Object tab, and an SDF Fusion panel in the Modifier tab above the stack.
+  The object right-click menu gets an SDF Fusion submenu.
+
+## 3i. 1.13.0: exact shading from the field
+
+* Martin: "the wrinkling is even worse in 1.12".  Measured on his case (a
+  cube with a pulled corner): face interiors were exactly flat (error 3% of a
+  voxel) and only the crease zones carried the half-voxel staircase, which
+  Auto Smooth marked sharp on 19% of its edges, producing a saw-tooth where
+  1.5's smooth shading had produced waves.  Both are shading artefacts of
+  the staircase.
+* Fix: Shading = Exact by default.  The density grid's gradient (Grid
+  Gradient node) is sampled at each vertex, negated and normalised, and set
+  as free custom normals (Set Mesh Normal, FREE / POINT, new in Blender 5).
+  Flat faces then match the analytic normals within 0.008, spheres within
+  0.02, creases shade like a one-voxel bevel, and no sharp-edge marking is
+  needed.  Silhouettes still show the staircase at low Quality; geometry is
+  fixed by Quality or the Precise Edges bake.
+
 ## 4. Verified
 
-* `tests/run_tests.py` on Blender 5.1.0 / macOS 26 / Apple M5: 224 checks,
+* `tests/run_tests.py` on Blender 5.1.0 / macOS 26 / Apple M5: 236 checks,
   all passing (primitive maths for all 8 primitives, all 15 operation x
   blend combinations, the Phase 1 acceptance flow, analytic volumes, colour
   and material blending, animation drivers, Apply Transform repair,

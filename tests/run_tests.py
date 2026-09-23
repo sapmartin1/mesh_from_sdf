@@ -636,6 +636,9 @@ def test_post_modifiers():
     bpy.ops.sdf_fusion.add_modifier(type='SIMPLE_DEFORM')
     names = [m.name for m in fusion.modifiers]
     check(names[0] == nodes.MODIFIER_NAME and names[1] == 'Twist / Bend', f"modifier added after SDF Fusion ({names})")
+    check(C.active_object == fusion and fusion.modifiers.active.name == 'Twist / Bend' and fusion.modifiers['Twist / Bend'].show_expanded,
+          "adding a modifier makes the fusion active with that modifier expanded (Blender's Modifier tab)")
+    C.view_layer.objects.active = sph
     fusion.modifiers['Twist / Bend'].angle = 1.2
     after = mesh_stats(evaluated_mesh(fusion))
     check(after['verts'] == before['verts'] and abs(after['min'][1] - before['min'][1]) > 0.1, "Twist deforms the live fused mesh without converting")
@@ -716,8 +719,28 @@ def test_shading_and_alignment():
     fs = fusion.sdf_fusion
     set_blend(fusion, 0.5)
     me = evaluated_mesh(fusion)
+    check(fs.shading == 'FIELD' and me.has_custom_normals, "Exact (field) shading is the default and writes custom normals")
+    co = np.array([v.co[:] for v in me.vertices])
+    lv = np.array([l.vertex_index for l in me.loops])
+    cn = np.array([l.normal[:] for l in me.loops])
+    q = np.abs(co[lv])
+    far_from_sphere = np.linalg.norm(co[lv] - np.array([1.3, 0.0, 0.7]), axis=1) > 0.8 + 0.5 + 0.15   # outside the blend zone
+    box_face = (np.sort(q, axis=1)[:, 1] < 0.7) & far_from_sphere                # box face interiors
+    axis = np.argmax(q, axis=1)
+    expected = np.zeros((len(lv), 3))
+    expected[np.arange(len(lv)), axis] = np.sign(co[lv][np.arange(len(lv)), axis])
+    err = np.linalg.norm(cn[box_face] - expected[box_face], axis=1)
+    check(box_face.sum() > 500 and np.percentile(err, 95) < 0.02, f"box faces shade exactly flat (normal error p95 {np.percentile(err, 95):.4f})")
+    centre = np.array([1.3, 0.0, 0.7])
+    radial = co[lv] - centre
+    on_sphere = (np.linalg.norm(radial, axis=1) < 0.85) & (co[lv][:, 0] > 1.7)
+    radial = radial / np.linalg.norm(radial, axis=1)[:, None]
+    err_s = np.linalg.norm(cn[on_sphere] - radial[on_sphere], axis=1)
+    check(on_sphere.sum() > 200 and np.percentile(err_s, 95) < 0.05, f"sphere shades with exact radial normals (p95 {np.percentile(err_s, 95):.4f})")
+    fs.shading = 'AUTO'
+    me = evaluated_mesh(fusion)
     sharp = me.attributes.get('sharp_edge')
-    check(fs.shading == 'AUTO' and sharp is not None, "Auto Smooth is the default and writes sharp edges")
+    check(sharp is not None, "Auto Smooth writes sharp edges")
     flags = np.array([s.value for s in sharp.data], dtype=bool)
     co = np.array([v.co[:] for v in me.vertices])
     ev = np.array([(e.vertices[0], e.vertices[1]) for e in me.edges])
@@ -736,6 +759,7 @@ def test_shading_and_alignment():
     fs.shading = 'AUTO'
     bpy.ops.sdf_fusion.convert()
     check(C.active_object.data.attributes.get('sharp_edge') is not None, "Convert keeps the sharp edges")
+    fs.shading = 'FIELD'
 
     # a rotated mesh cube now matches the analytic box as closely as an analytic box does
     def crease_error(primitive):
@@ -891,6 +915,21 @@ def test_primitive_becomes_editable():
     C.view_layer.update()
     C.evaluated_depsgraph_get()
     check(sph.sdf_shape.primitive == 'SPHERE' and np.allclose(sph.scale, (1.5, 1.5, 1.5), atol=1e-4), "Apply Scale keeps a primitive exact (repaired, not promoted)")
+
+
+def test_properties_panels():
+    print("\n[20] settings in Blender's Properties editor and context menu")
+    for cls in ('SDFF_PT_props_shape', 'SDFF_PT_props_fusion', 'SDFF_PT_props_modifier', 'SDFF_MT_context'):
+        check(hasattr(bpy.types, cls), f"{cls} registered")
+    check(bpy.types.SDFF_PT_props_shape.bl_context == 'object' and bpy.types.SDFF_PT_props_modifier.bl_context == 'modifier', "panels target the Object and Modifier tabs")
+    check(any(getattr(f, '__name__', '') == 'draw_object_context_menu' for f in bpy.types.VIEW3D_MT_object_context_menu.draw._draw_funcs), "SDF Fusion entry in the object context menu")
+    reset_scene()
+    fusion = ops.create_fusion(C, Vector((0, 0, 0)))
+    box = ops.add_shape(C, fusion, 'BOX', Vector((0, 0, 0)))
+    C.view_layer.objects.active = box
+    check(bpy.types.SDFF_PT_props_shape.poll(C) and not bpy.types.SDFF_PT_props_fusion.poll(C), "shape active: SDF Shape panel shows, fusion panel hides")
+    bpy.ops.sdf_fusion.edit_modifiers()
+    check(C.active_object == fusion and bpy.types.SDFF_PT_props_fusion.poll(C) and bpy.types.SDFF_PT_props_modifier.poll(C), "Edit Modifiers selects the fusion; its Object and Modifier tab panels show")
 
 
 def test_cutters_and_guides():
@@ -1391,7 +1430,7 @@ def test_timing():
 
 def main():
     t0 = time.perf_counter()
-    for test in (test_field_matches_reference, test_acceptance_flow, test_primitive_volumes, test_placement, test_mesh_shapes, test_mirror_and_hollow, test_post_modifiers, test_smart_topology, test_add_menu, test_shading_and_alignment, test_precise_convert, test_primitive_becomes_editable, test_cutters_and_guides, test_duplicate, test_animation_and_apply, test_ramp_family, test_color_blending, test_material_blending, test_timing):
+    for test in (test_field_matches_reference, test_acceptance_flow, test_primitive_volumes, test_placement, test_mesh_shapes, test_mirror_and_hollow, test_post_modifiers, test_smart_topology, test_add_menu, test_shading_and_alignment, test_precise_convert, test_primitive_becomes_editable, test_properties_panels, test_cutters_and_guides, test_duplicate, test_animation_and_apply, test_ramp_family, test_color_blending, test_material_blending, test_timing):
         try:
             t_start = time.perf_counter()
             test()

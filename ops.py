@@ -820,7 +820,9 @@ def dual_contour_bake(context, fusion, guide_mesh, resolution, mesh_detail=None)
     fs = fusion.sdf_fusion
     if fs.shading == 'FLAT':
         mesh.polygons.foreach_set('use_smooth', np.zeros(len(mesh.polygons), dtype=bool))
-    elif fs.shading == 'AUTO':
+    elif fs.shading in ('AUTO', 'FIELD'):
+        # dual-contouring faces never straddle a crease, so angle-based sharp
+        # edges give exact hard edges in the bake
         import bmesh as _bm
         bm = _bm.new()
         bm.from_mesh(mesh)
@@ -1233,7 +1235,49 @@ class SDFF_OT_add_modifier(Operator):
     def execute(self, context):
         fusion = find_fusion(context)
         mod = add_post_modifier(fusion, self.type)
-        self.report({'INFO'}, f"{mod.name} added after SDF Fusion; edit it in the Modifier tab of {fusion.name}")
+        focus_modifiers(context, fusion, mod)
+        self.report({'INFO'}, f"{mod.name} added to {fusion.name}; its settings are open in the Modifier tab")
+        return {'FINISHED'}
+
+
+def focus_modifiers(context, fusion, mod=None):
+    """Make the fusion the active object and show its modifier stack in the
+    Properties editor, so Blender's own modifier UI is what the user edits."""
+    try:
+        for o in context.view_layer.objects:
+            o.select_set(o == fusion)
+        context.view_layer.objects.active = fusion
+    except RuntimeError:
+        pass
+    for m in fusion.modifiers:
+        m.show_expanded = (mod is None) or (m == mod) or (m.name == nodes.MODIFIER_NAME and mod is None)
+    if mod is not None:
+        fusion.modifiers.active = mod
+    screen = getattr(context, 'screen', None)
+    if screen is not None:
+        for area in screen.areas:
+            if area.type == 'PROPERTIES':
+                try:
+                    area.spaces.active.context = 'MODIFIER'
+                except Exception:
+                    pass
+
+
+class SDFF_OT_edit_modifiers(Operator):
+    bl_idname = "sdf_fusion.edit_modifiers"
+    bl_label = "Edit Modifiers"
+    bl_description = "Select the fusion and open its modifier stack in the Properties editor"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    name: StringProperty()
+
+    @classmethod
+    def poll(cls, context):
+        return find_fusion(context) is not None
+
+    def execute(self, context):
+        fusion = find_fusion(context)
+        focus_modifiers(context, fusion, fusion.modifiers.get(self.name) if self.name else None)
         return {'FINISHED'}
 
 
@@ -1295,6 +1339,7 @@ classes = (
     SDFF_OT_color_from_material,
     SDFF_OT_setup_color_material,
     SDFF_OT_add_modifier,
+    SDFF_OT_edit_modifiers,
     SDFF_OT_remove_modifier,
     SDFF_OT_convert,
 )

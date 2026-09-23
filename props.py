@@ -238,10 +238,12 @@ class SDFFusionSettings(PropertyGroup):
         name="Steps", default=3, min=1, max=32,
         description="Number of steps for the Steps blend mode", update=_fusion_values)
     shading: EnumProperty(
-        name="Shading", default='AUTO',
-        items=(('AUTO', 'Auto Smooth', 'Sharp creases (box edges) shade sharp, blends and curved parts smooth', 0),
-               ('SMOOTH', 'Smooth', 'Everything smooth shaded (sharp creases show as wavy bands)', 1),
-               ('FLAT', 'Flat', 'Flat shading, shows the raw polygons', 2)),
+        name="Shading", default='FIELD',
+        items=(('FIELD', 'Exact', 'Normals come from the distance field itself: flat faces shade perfectly flat and '
+                                  'creases stay crisp at any Quality (recommended)', 0),
+               ('AUTO', 'Auto Smooth', 'Sharp creases by edge angle, blends smooth (shows the grid staircase at creases)', 1),
+               ('SMOOTH', 'Smooth', 'Everything smooth shaded (sharp creases show as wavy bands)', 2),
+               ('FLAT', 'Flat', 'Flat shading, shows the raw polygons', 3)),
         update=_fusion_rebuild)
     smooth_angle: FloatProperty(
         name="Sharp Angle", default=0.5235988, min=0.0, max=3.1415927, subtype='ANGLE',

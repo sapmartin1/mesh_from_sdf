@@ -943,6 +943,26 @@ def rebuild(fusion_ob):
         b.link(loose, delete.inputs['Selection'])
         mesh_out = delete.outputs[0]
 
+    if settings.shading == 'FIELD':
+        # Exact shading: normals are the gradient of the distance field at each
+        # vertex, so flat faces shade perfectly flat and creases stay crisp,
+        # whatever the grid's staircase geometry does.
+        grad = b.node('GeometryNodeGridGradient')
+        b.link(grid.outputs['Grid'], grad.inputs['Grid'])
+        smpv = b.node('GeometryNodeSampleGrid')
+        smpv.data_type = 'VECTOR'
+        b.link(grad.outputs['Gradient'], smpv.inputs['Grid'])
+        b.link(position, smpv.inputs['Position'])
+        gvec = next(s for s in smpv.outputs if s.enabled)
+        # density = -distance, so the outward normal is minus the gradient
+        nrm = b.vmath('SCALE', b.vmath('NORMALIZE', gvec), scale=-1.0)
+        setn = b.node('GeometryNodeSetMeshNormal', 'FIELD_NORMALS')
+        setn.mode = 'FREE'
+        setn.domain = 'POINT'
+        b.link(mesh_out, setn.inputs['Mesh'])
+        b.link(nrm, setn.inputs['Custom Normal'])
+        mesh_out = setn.outputs[0]
+
     # Grid to Mesh output carries no material; apply the fusion object's own.
     setmat = b.node('GeometryNodeSetMaterial', 'SET_MATERIAL')
     b.link(mesh_out, setmat.inputs['Geometry'])

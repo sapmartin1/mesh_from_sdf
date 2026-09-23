@@ -49,6 +49,137 @@ def draw_add_menu(self, context):
     self.layout.menu('SDFF_MT_add', icon='MOD_SMOOTH')
 
 
+def draw_add_buttons(layout):
+    col = layout.column(align=True)
+    row = col.row(align=True)
+    row.scale_y = 1.4
+    row.operator('sdf_fusion.add_shape', text="Box", icon='MESH_CUBE').primitive = 'BOX'
+    row.operator('sdf_fusion.add_shape', text="Sphere", icon='MESH_UVSPHERE').primitive = 'SPHERE'
+    row.operator('sdf_fusion.add_shape', text="Cylinder", icon='MESH_CYLINDER').primitive = 'CYLINDER'
+    row = col.row(align=True)
+    row.operator('sdf_fusion.add_shape', text="Torus", icon='MESH_TORUS').primitive = 'TORUS'
+    row.operator('sdf_fusion.add_shape', text="Cone", icon='MESH_CONE').primitive = 'CONE'
+    row.operator('sdf_fusion.add_shape', text="Capsule", icon='MESH_CAPSULE').primitive = 'CAPSULE'
+    row = col.row(align=True)
+    row.operator('sdf_fusion.add_shape', text="Pyramid", icon='CONE').primitive = 'PYRAMID'
+    row.operator('sdf_fusion.add_shape', text="Prism", icon='MESH_ICOSPHERE').primitive = 'PRISM'
+    row.operator('sdf_fusion.add_shape', text="Mesh", icon='EDITMODE_HLT').primitive = 'MESH'
+    row = col.row(align=True)
+    row.operator('sdf_fusion.adopt_selected', text="Use Selected Objects", icon='IMPORT')
+    row.operator('sdf_fusion.new_fusion', text="", icon='ADD')
+
+
+def draw_shape_settings(layout, context, shape, header=True):
+    st = shape.sdf_shape
+    box = layout.box() if header else layout
+    if header:
+        box.label(text=shape.name, icon='OBJECT_DATA')
+    box.prop(st, 'primitive', text="")
+    row = box.row(align=True)
+    row.prop(st, 'operation', expand=True)
+    if st.operation == 'SUBTRACT':
+        box.label(text="Carved out of the result", icon='SELECT_SUBTRACT')
+    elif st.operation == 'INTERSECT':
+        box.label(text="Only the part inside this shape is kept", icon='SELECT_INTERSECT')
+    col = box.column(align=True)
+    col.prop(st, 'radius', slider=True)
+    col.prop(st, 'fill', slider=True)
+    row = box.row(align=True)
+    row.prop(st, 'color', text="Color")
+    row.operator('sdf_fusion.color_from_material', text="", icon='MATERIAL')
+    size_label = {'SPHERE': "Diameter", 'TORUS': "Outer Size"}.get(st.primitive, "Size")
+    col = box.column(align=True)
+    col.prop(shape, 'dimensions', text=size_label)
+    if st.primitive == 'MESH':
+        box.label(text="Editable mesh: Tab to edit, loop cut, sculpt", icon='EDITMODE_HLT')
+        if not ops.mesh_is_closed(shape.data):
+            warn = box.row()
+            warn.alert = True
+            warn.label(text="Mesh is not closed: field may be unreliable", icon='ERROR')
+        row = box.row(align=True)
+        row.operator('sdf_fusion.release_shape', icon='UNLINKED')
+    else:
+        row = box.row(align=True)
+        row.operator('sdf_fusion.make_editable', icon='EDITMODE_HLT')
+        row.label(text="(or just Tab and edit)")
+    if st.primitive == 'PRISM':
+        box.prop(st, 'sides')
+    if st.primitive in {'BOX', 'CYLINDER', 'PRISM'}:
+        box.prop(st, 'rounding', slider=True)
+    elif st.primitive == 'TORUS':
+        box.prop(st, 'tube', slider=True)
+    elif st.primitive == 'CONE':
+        box.prop(st, 'top_radius', slider=True)
+
+
+def draw_fusion_warnings(layout, fusion):
+    fs = fusion.sdf_fusion
+    included = [r.object for r in fs.shapes if r.object is not None and r.object.sdf_shape.include]
+    if included and not any(o.sdf_shape.operation == 'UNION' for o in included):
+        warn = layout.box()
+        warn.alert = True
+        warn.label(text="Nothing to cut: no Union shape", icon='ERROR')
+        warn.label(text="Set at least one shape to Union")
+    elif included and included[0].sdf_shape.operation != 'UNION':
+        warn = layout.box()
+        warn.alert = True
+        warn.label(text="First shape is a cutter, it acts as the base", icon='ERROR')
+        warn.label(text="Enable Cutters Last or reorder the shapes")
+
+
+def draw_fusion_settings(layout, context, fusion, header=True):
+    fs = fusion.sdf_fusion
+    box = layout.box() if header else layout
+    if header:
+        row = box.row()
+        row.label(text=fusion.name, icon='MOD_SMOOTH')
+        row.operator('sdf_fusion.select_fusion', text="", icon='RESTRICT_SELECT_OFF')
+        row.operator('sdf_fusion.duplicate_fusion', text="", icon='DUPLICATE')
+    col = box.column(align=True)
+    col.prop(fs, 'radius_scale', slider=True)
+    col.prop(fs, 'fill_scale', slider=True)
+    col.prop(fs, 'mode', text="")
+    if fs.mode == 'STEPS':
+        col.prop(fs, 'steps')
+    col = box.column(align=True)
+    col.prop(fs, 'quality', text="Quality")
+    if fs.quality == 'CUSTOM':
+        col.prop(fs, 'resolution')
+    col.prop(fs, 'adaptivity', slider=True)
+    if any(r.object is not None and r.object.sdf_shape.primitive == 'MESH' for r in fs.shapes):
+        col.prop(fs, 'mesh_detail', slider=True)
+    col.prop(fs, 'live', toggle=True, icon='PLAY' if fs.live else 'PAUSE')
+    row = box.row(align=True)
+    row.prop(fs, 'shading', text="")
+    if fs.shading == 'AUTO':
+        row.prop(fs, 'smooth_angle', text="")
+    row = box.row(align=True)
+    row.label(text="Mirror")
+    row.prop(fs, 'mirror_x', toggle=True)
+    row.prop(fs, 'mirror_y', toggle=True)
+    row.prop(fs, 'mirror_z', toggle=True)
+    box.prop(fs, 'shell', slider=True)
+    row = box.row(align=True)
+    row.prop(fs, 'guide_display', expand=True)
+    col = box.column(align=True)
+    col.prop(fs, 'blend_colors', toggle=True, icon='COLOR')
+    col.template_ID(fusion, 'active_material', new='material.new')
+    if fs.blend_colors and not ops.material_reads_color_attribute(fusion.active_material):
+        col.operator('sdf_fusion.setup_color_material', icon='NODE_MATERIAL')
+
+
+def draw_convert(layout, fusion):
+    fs = fusion.sdf_fusion
+    box = layout.box()
+    box.prop(fs, 'final_resolution')
+    box.prop(fs, 'precise_convert')
+    row = box.row()
+    row.scale_y = 1.4
+    row.operator('sdf_fusion.convert', icon='MESH_DATA')
+    if ops.setup_is_hidden(fusion):
+        box.operator('sdf_fusion.show_setup', icon='HIDE_OFF')
+
+
 class SDFF_PT_main(Panel):
     bl_label = "SDF Fusion"
     bl_idname = "SDFF_PT_main"
@@ -60,128 +191,103 @@ class SDFF_PT_main(Panel):
         layout = self.layout
         fusion = ops.find_fusion(context)
         shape = ops.active_shape(context)
-
-        col = layout.column(align=True)
-        row = col.row(align=True)
-        row.scale_y = 1.4
-        row.operator('sdf_fusion.add_shape', text="Box", icon='MESH_CUBE').primitive = 'BOX'
-        row.operator('sdf_fusion.add_shape', text="Sphere", icon='MESH_UVSPHERE').primitive = 'SPHERE'
-        row.operator('sdf_fusion.add_shape', text="Cylinder", icon='MESH_CYLINDER').primitive = 'CYLINDER'
-        row = col.row(align=True)
-        row.operator('sdf_fusion.add_shape', text="Torus", icon='MESH_TORUS').primitive = 'TORUS'
-        row.operator('sdf_fusion.add_shape', text="Cone", icon='MESH_CONE').primitive = 'CONE'
-        row.operator('sdf_fusion.add_shape', text="Capsule", icon='MESH_CAPSULE').primitive = 'CAPSULE'
-        row = col.row(align=True)
-        row.operator('sdf_fusion.add_shape', text="Pyramid", icon='CONE').primitive = 'PYRAMID'
-        row.operator('sdf_fusion.add_shape', text="Prism", icon='MESH_ICOSPHERE').primitive = 'PRISM'
-        row.operator('sdf_fusion.add_shape', text="Mesh", icon='EDITMODE_HLT').primitive = 'MESH'
-        row = col.row(align=True)
-        row.operator('sdf_fusion.adopt_selected', text="Use Selected Objects", icon='IMPORT')
-        row.operator('sdf_fusion.new_fusion', text="", icon='ADD')
-
+        draw_add_buttons(layout)
         if fusion is None:
             box = layout.box()
             box.label(text="Add a shape to start fusing", icon='INFO')
             return
-
         if shape is not None:
-            st = shape.sdf_shape
-            box = layout.box()
-            box.label(text=shape.name, icon='OBJECT_DATA')
-            box.prop(st, 'primitive', text="")
-            row = box.row(align=True)
-            row.prop(st, 'operation', expand=True)
-            if st.operation == 'SUBTRACT':
-                box.label(text="Carved out of the result", icon='SELECT_SUBTRACT')
-            elif st.operation == 'INTERSECT':
-                box.label(text="Only the part inside this shape is kept", icon='SELECT_INTERSECT')
-            col = box.column(align=True)
-            col.prop(st, 'radius', slider=True)
-            col.prop(st, 'fill', slider=True)
-            row = box.row(align=True)
-            row.prop(st, 'color', text="Color")
-            row.operator('sdf_fusion.color_from_material', text="", icon='MATERIAL')
-            size_label = {'SPHERE': "Diameter", 'TORUS': "Outer Size"}.get(st.primitive, "Size")
-            col = box.column(align=True)
-            col.prop(shape, 'dimensions', text=size_label)
-            if st.primitive == 'MESH':
-                box.label(text="Editable mesh: Tab to edit, loop cut, sculpt", icon='EDITMODE_HLT')
-                if not ops.mesh_is_closed(shape.data):
-                    warn = box.row()
-                    warn.alert = True
-                    warn.label(text="Mesh is not closed: field may be unreliable", icon='ERROR')
-                row = box.row(align=True)
-                row.operator('sdf_fusion.release_shape', icon='UNLINKED')
-            else:
-                row = box.row(align=True)
-                row.operator('sdf_fusion.make_editable', icon='EDITMODE_HLT')
-                row.label(text="(or just Tab and edit)")
-            if st.primitive == 'PRISM':
-                box.prop(st, 'sides')
-            if st.primitive in {'BOX', 'CYLINDER', 'PRISM'}:
-                box.prop(st, 'rounding', slider=True)
-            elif st.primitive == 'TORUS':
-                box.prop(st, 'tube', slider=True)
-            elif st.primitive == 'CONE':
-                box.prop(st, 'top_radius', slider=True)
+            draw_shape_settings(layout, context, shape)
+        draw_fusion_warnings(layout, fusion)
+        draw_fusion_settings(layout, context, fusion)
+        draw_convert(layout, fusion)
 
-        fs = fusion.sdf_fusion
-        included = [r.object for r in fs.shapes if r.object is not None and r.object.sdf_shape.include]
-        if included and not any(o.sdf_shape.operation == 'UNION' for o in included):
-            warn = layout.box()
-            warn.alert = True
-            warn.label(text="Nothing to cut: no Union shape", icon='ERROR')
-            warn.label(text="Set at least one shape to Union")
-        elif included and included[0].sdf_shape.operation != 'UNION':
-            warn = layout.box()
-            warn.alert = True
-            warn.label(text="First shape is a cutter, it acts as the base", icon='ERROR')
-            warn.label(text="Enable Cutters Last or reorder the shapes")
-        box = layout.box()
-        row = box.row()
-        row.label(text=fusion.name, icon='MOD_SMOOTH')
-        row.operator('sdf_fusion.select_fusion', text="", icon='RESTRICT_SELECT_OFF')
-        row.operator('sdf_fusion.duplicate_fusion', text="", icon='DUPLICATE')
-        col = box.column(align=True)
-        col.prop(fs, 'radius_scale', slider=True)
-        col.prop(fs, 'fill_scale', slider=True)
-        col.prop(fs, 'mode', text="")
-        if fs.mode == 'STEPS':
-            col.prop(fs, 'steps')
-        col = box.column(align=True)
-        col.prop(fs, 'quality', text="Quality")
-        if fs.quality == 'CUSTOM':
-            col.prop(fs, 'resolution')
-        col.prop(fs, 'adaptivity', slider=True)
-        if any(r.object is not None and r.object.sdf_shape.primitive == 'MESH' for r in fs.shapes):
-            col.prop(fs, 'mesh_detail', slider=True)
-        row = box.row(align=True)
-        row.prop(fs, 'shading', text="")
-        if fs.shading == 'AUTO':
-            row.prop(fs, 'smooth_angle', text="")
-        row = box.row(align=True)
-        row.label(text="Mirror")
-        row.prop(fs, 'mirror_x', toggle=True)
-        row.prop(fs, 'mirror_y', toggle=True)
-        row.prop(fs, 'mirror_z', toggle=True)
-        box.prop(fs, 'shell', slider=True)
-        col.prop(fs, 'live', toggle=True, icon='PLAY' if fs.live else 'PAUSE')
-        row = box.row(align=True)
-        row.prop(fs, 'guide_display', expand=True)
-        col = box.column(align=True)
-        col.prop(fs, 'blend_colors', toggle=True, icon='COLOR')
-        col.template_ID(fusion, 'active_material', new='material.new')
-        if fs.blend_colors and not ops.material_reads_color_attribute(fusion.active_material):
-            col.operator('sdf_fusion.setup_color_material', icon='NODE_MATERIAL')
 
-        box = layout.box()
-        box.prop(fs, 'final_resolution')
-        box.prop(fs, 'precise_convert')
-        row = box.row()
-        row.scale_y = 1.4
-        row.operator('sdf_fusion.convert', icon='MESH_DATA')
-        if ops.setup_is_hidden(fusion):
-            box.operator('sdf_fusion.show_setup', icon='HIDE_OFF')
+# --- the same settings where Blender users expect them: the Properties editor ---
+
+class SDFF_PT_props_shape(Panel):
+    """Object tab of a shape: its SDF settings, next to Transform / Relations."""
+    bl_label = "SDF Shape"
+    bl_idname = "SDFF_PT_props_shape"
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = 'object'
+
+    @classmethod
+    def poll(cls, context):
+        return ops.active_shape(context) is not None
+
+    def draw(self, context):
+        shape = ops.active_shape(context)
+        draw_shape_settings(self.layout, context, shape, header=False)
+        fusion = shape.sdf_shape.fusion
+        if fusion is not None:
+            self.layout.operator('sdf_fusion.select_fusion', text=f"Go to {fusion.name}", icon='MOD_SMOOTH')
+
+
+class SDFF_PT_props_fusion(Panel):
+    """Object tab of a fusion: blend, quality, mirror, materials, convert."""
+    bl_label = "SDF Fusion"
+    bl_idname = "SDFF_PT_props_fusion"
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = 'object'
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.active_object
+        return ob is not None and ob.sdf_fusion.enabled
+
+    def draw(self, context):
+        fusion = context.active_object
+        draw_fusion_warnings(self.layout, fusion)
+        draw_fusion_settings(self.layout, context, fusion, header=False)
+        draw_convert(self.layout, fusion)
+
+
+class SDFF_PT_props_modifier(Panel):
+    """Modifier tab of a fusion: the SDF settings sit above the modifier stack."""
+    bl_label = "SDF Fusion"
+    bl_idname = "SDFF_PT_props_modifier"
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = 'modifier'
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.active_object
+        return ob is not None and ob.sdf_fusion.enabled
+
+    def draw(self, context):
+        fusion = context.active_object
+        layout = self.layout
+        layout.label(text="Blender modifiers below post-process the fused mesh live", icon='INFO')
+        draw_fusion_settings(layout, context, fusion, header=False)
+        draw_convert(layout, fusion)
+
+
+def draw_object_context_menu(self, context):
+    layout = self.layout
+    layout.separator()
+    layout.menu('SDFF_MT_context', icon='MOD_SMOOTH')
+
+
+class SDFF_MT_context(Menu):
+    bl_idname = "SDFF_MT_context"
+    bl_label = "SDF Fusion"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.operator('sdf_fusion.adopt_selected', icon='IMPORT')
+        layout.operator('sdf_fusion.make_editable', icon='EDITMODE_HLT')
+        layout.operator('sdf_fusion.release_shape', icon='UNLINKED')
+        layout.separator()
+        layout.operator('sdf_fusion.select_fusion', icon='RESTRICT_SELECT_OFF')
+        layout.operator('sdf_fusion.edit_modifiers', icon='MODIFIER')
+        layout.operator('sdf_fusion.duplicate_fusion', icon='DUPLICATE')
+        layout.separator()
+        layout.operator('sdf_fusion.convert', icon='MESH_DATA')
 
 
 class SDFF_PT_shape_material(Panel):
@@ -235,7 +341,7 @@ class SDFF_PT_modifiers(Panel):
     def draw(self, context):
         layout = self.layout
         fusion = ops.find_fusion(context)
-        layout.label(text="Applied live to the fused mesh, no conversion needed", icon='INFO')
+        layout.label(text="Blender modifiers on the fusion object, applied live", icon='INFO')
         col = layout.column(align=True)
         for i in range(0, len(ops.MODIFIER_PRESETS), 2):
             row = col.row(align=True)
@@ -249,8 +355,9 @@ class SDFF_PT_modifiers(Panel):
                 row = box.row(align=True)
                 row.prop(mod, 'show_viewport', text="")
                 row.label(text=mod.name, icon='MODIFIER')
+                row.operator('sdf_fusion.edit_modifiers', text="", icon='PROPERTIES').name = mod.name
                 row.operator('sdf_fusion.remove_modifier', text="", icon='X').name = mod.name
-            box.label(text=f"Settings: Modifier tab of {fusion.name}", icon='PROPERTIES')
+            box.operator('sdf_fusion.edit_modifiers', text=f"Edit in Modifier tab of {fusion.name}", icon='PROPERTIES')
         shape = ops.active_shape(context)
         if shape is not None and shape.sdf_shape.primitive == 'MESH':
             layout.label(text="Modifiers on a Mesh shape feed its field too", icon='EDITMODE_HLT')
@@ -290,16 +397,19 @@ class SDFF_PT_shapes(Panel):
             layout.label(text="Shapes are combined strictly top to bottom", icon='INFO')
 
 
-classes = (SDFF_UL_shapes, SDFF_MT_add, SDFF_PT_main, SDFF_PT_shape_material, SDFF_PT_modifiers, SDFF_PT_shapes)
+classes = (SDFF_UL_shapes, SDFF_MT_add, SDFF_MT_context, SDFF_PT_main, SDFF_PT_shape_material, SDFF_PT_modifiers, SDFF_PT_shapes,
+           SDFF_PT_props_shape, SDFF_PT_props_fusion, SDFF_PT_props_modifier)
 
 
 def register():
     for c in classes:
         bpy.utils.register_class(c)
     bpy.types.VIEW3D_MT_add.append(draw_add_menu)
+    bpy.types.VIEW3D_MT_object_context_menu.append(draw_object_context_menu)
 
 
 def unregister():
+    bpy.types.VIEW3D_MT_object_context_menu.remove(draw_object_context_menu)
     bpy.types.VIEW3D_MT_add.remove(draw_add_menu)
     for c in reversed(classes):
         bpy.utils.unregister_class(c)
