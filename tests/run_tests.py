@@ -664,6 +664,42 @@ def test_post_modifiers():
     check(fusion.modifiers.get(nodes.MODIFIER_NAME) is not None, "the SDF Fusion modifier itself cannot be removed this way")
 
 
+def test_smart_topology():
+    print("\n[15] smart topology: polygons only where the surface curves")
+    reset_scene()
+    fusion = ops.create_fusion(C, Vector((0, 0, 0)))
+    a = ops.add_shape(C, fusion, 'BOX', Vector((0, 0, 0)))
+    b_ = ops.add_shape(C, fusion, 'BOX', Vector((1.6, 0.4, 0.5)))
+    b_.scale = (0.7, 0.7, 0.7)
+    fs = fusion.sdf_fusion
+    fs.quality = 'HIGH'
+    set_blend(fusion, 0.4)
+    fs.adaptivity = 0.0
+    s0 = mesh_stats(evaluated_mesh(fusion))
+    fs.adaptivity = 0.6
+    me = evaluated_mesh(fusion)
+    s1 = mesh_stats(me)
+    check(s1['faces'] < 0.3 * s0['faces'] and abs(s1['volume'] - s0['volume']) / s0['volume'] < 0.02,
+          f"Smart Topology 0.6 cuts polygons from {s0['faces']} to {s1['faces']} with the same volume ({s0['volume']:.3f} vs {s1['volume']:.3f})")
+    # flat faces get large polygons, curved (blended) areas keep small ones
+    flat = [p for p in me.polygons if max(abs(p.normal.x), abs(p.normal.y), abs(p.normal.z)) > 0.999]
+    curved = [p for p in me.polygons if max(abs(p.normal.x), abs(p.normal.y), abs(p.normal.z)) < 0.9]
+    flat_area = sum(p.area for p in flat) / max(1, len(flat))
+    curved_area = sum(p.area for p in curved) / max(1, len(curved))
+    check(len(curved) > 100 and flat_area > 2.0 * curved_area,
+          f"flat polygons are {flat_area / max(curved_area, 1e-9):.1f}x larger than polygons on the blends ({len(flat)} flat, {len(curved)} curved)")
+    fs.final_resolution = 96
+    fs.adaptivity = 0.0
+    bpy.ops.sdf_fusion.convert()
+    plain = mesh_stats(C.active_object.data)
+    fusion.hide_set(False)
+    fs.adaptivity = 0.6
+    C.view_layer.objects.active = fusion
+    bpy.ops.sdf_fusion.convert()
+    smart = mesh_stats(C.active_object.data)
+    check(smart['faces'] < 0.3 * plain['faces'] and abs(smart['volume'] - plain['volume']) / plain['volume'] < 0.02 and smart['islands'] == 1,
+          f"Convert keeps the smart topology ({plain['faces']} -> {smart['faces']} faces, same volume)")
+
 def test_cutters_and_guides():
     print("\n[9] cutters always cut, guide display, Shift+D on a shape")
     reset_scene()
@@ -1162,7 +1198,7 @@ def test_timing():
 
 def main():
     t0 = time.perf_counter()
-    for test in (test_field_matches_reference, test_acceptance_flow, test_primitive_volumes, test_placement, test_mesh_shapes, test_mirror_and_hollow, test_post_modifiers, test_cutters_and_guides, test_duplicate, test_animation_and_apply, test_ramp_family, test_color_blending, test_material_blending, test_timing):
+    for test in (test_field_matches_reference, test_acceptance_flow, test_primitive_volumes, test_placement, test_mesh_shapes, test_mirror_and_hollow, test_post_modifiers, test_smart_topology, test_cutters_and_guides, test_duplicate, test_animation_and_apply, test_ramp_family, test_color_blending, test_material_blending, test_timing):
         try:
             t_start = time.perf_counter()
             test()

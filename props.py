@@ -264,8 +264,11 @@ class SDFFusionSettings(PropertyGroup):
         name="Final Resolution", default=192, min=8, soft_max=384, max=1024,
         description="Voxels along the longest axis used by Convert to Mesh")
     adaptivity: FloatProperty(
-        name="Adaptivity", default=0.0, min=0.0, max=1.0,
-        description="Merge flat areas into larger polygons (0 = uniform mesh)", update=_fusion_values)
+        name="Smart Topology", default=0.0, min=0.0, max=1.0, subtype='FACTOR',
+        description="Spend polygons only where the surface curves: flat areas get a few large "
+                    "polygons while blends and rounded parts stay dense. 0 = uniform grid mesh, "
+                    "higher = fewer polygons on flat areas (applies to the live mesh and to Convert)",
+        update=_fusion_values)
     blend_colors: BoolProperty(
         name="Blend Materials", default=False,
         description="Give every shape its own colour, metallic, roughness, transmission, IOR and "
