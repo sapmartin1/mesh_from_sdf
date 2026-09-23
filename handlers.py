@@ -21,8 +21,15 @@ def depsgraph_update_post(scene, depsgraph):
                           if u.id.id_type == 'MESH' and u.is_updated_geometry}
         if updated_meshes:
             for ob in scene.objects:
-                if ob.sdf_shape.enabled and ob.type == 'MESH' and ob.data.name in updated_meshes:
-                    ops.repair_applied_transform(ob)
+                if not (ob.sdf_shape.enabled and ob.type == 'MESH' and ob.data.name in updated_meshes):
+                    continue
+                if ob.sdf_shape.primitive == 'MESH':
+                    continue
+                if ob.mode == 'EDIT':
+                    # editing a primitive's guide in Edit Mode: it becomes an editable mesh shape
+                    ops.promote_to_mesh(ob)
+                elif ops.repair_applied_transform(ob) == 'EDITED':
+                    ops.promote_to_mesh(ob)
         for fusion in ops.adopt_orphan_shapes(scene):
             ops.apply_guide_display(fusion)
             nodes.rebuild(fusion)

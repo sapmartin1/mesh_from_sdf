@@ -113,7 +113,9 @@ class SDFF_PT_main(Panel):
                 row = box.row(align=True)
                 row.operator('sdf_fusion.release_shape', icon='UNLINKED')
             else:
-                box.operator('sdf_fusion.make_editable', icon='EDITMODE_HLT')
+                row = box.row(align=True)
+                row.operator('sdf_fusion.make_editable', icon='EDITMODE_HLT')
+                row.label(text="(or just Tab and edit)")
             if st.primitive == 'PRISM':
                 box.prop(st, 'sides')
             if st.primitive in {'BOX', 'CYLINDER', 'PRISM'}:

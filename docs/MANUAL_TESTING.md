@@ -105,6 +105,12 @@ on your M5 Mac with Blender 5.2 and note anything that misbehaves.
 - [ ] Convert with Precise Edges on: in Edit Mode the crease vertices lie on
       a perfectly straight line; with it off they zig-zag.
 
+## 1.12 additions
+
+- [ ] Add a Cylinder (primitive), Tab, select the top cap, S 1.8: the fused
+      cylinder flares live and the shape box now says "Editable mesh".
+      Set Primitive back to Cylinder: exact again.
+
 ## UI / workflow
 
 - [ ] Clicking a row in the *Shapes* sub-panel selects that shape.

@@ -254,9 +254,21 @@ Deviations from upstream, on purpose:
 * Follow-up idea: exact distances to mesh shapes' triangles (BVH) at bake
   time would make their creases exact too.
 
+## 3g. 1.12.0: primitives become editable when touched
+
+* Martin edited a primitive cylinder's guide mesh (scaled its cap) and
+  nothing happened, because a primitive is a formula and the guide is only a
+  guide.  Now the depsgraph handler classifies guide-mesh changes: an affine
+  change (Apply Scale / Rotation / Location) is folded back into the object
+  as before; any other change, or any change while the object is in Edit
+  Mode, promotes the shape to a mesh shape (geometry kept) so the edit takes
+  effect live.  Set Primitive back to return to the exact formula.
+* `__init__.py` reloads its submodules on Blender's in-place reload, so
+  disable/enable or Install from Disk picks up new code without a restart.
+
 ## 4. Verified
 
-* `tests/run_tests.py` on Blender 5.1.0 / macOS 26 / Apple M5: 219 checks,
+* `tests/run_tests.py` on Blender 5.1.0 / macOS 26 / Apple M5: 224 checks,
   all passing (primitive maths for all 8 primitives, all 15 operation x
   blend combinations, the Phase 1 acceptance flow, analytic volumes, colour
   and material blending, animation drivers, Apply Transform repair,

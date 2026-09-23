@@ -9,7 +9,14 @@ distance field is now compiled into a Geometry Nodes tree; see
 docs/PORTING_NOTES.md for the full record.
 """
 
-from . import handlers, ops, props, ui
+# Support Blender's in-place reload (disable / enable, Install from Disk over
+# an older version): reload every submodule, in dependency order.
+if "props" in locals():
+    import importlib
+    for _m in (nodes, props, ops, ui, handlers):
+        importlib.reload(_m)
+
+from . import handlers, nodes, ops, props, ui
 
 _modules = (props, ops, ui, handlers)
 

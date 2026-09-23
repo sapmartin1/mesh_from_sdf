@@ -844,6 +844,55 @@ def test_precise_convert():
     check(errs[1] < errs[0] * 0.6, f"mesh cube: surface error {errs[0]:.4f} -> {errs[1]:.4f}")
 
 
+def test_primitive_becomes_editable():
+    print("\n[19] editing a primitive's vertices turns it into a mesh shape automatically")
+    reset_scene()
+    fusion = ops.create_fusion(C, Vector((0, 0, 0)))
+    cyl = ops.add_shape(C, fusion, 'CYLINDER', Vector((0, 0, 0)))
+    C.view_layer.objects.active = cyl
+    cyl.select_set(True)
+    s0 = mesh_stats(evaluated_mesh(fusion))
+    # Edit Mode: scale the top cap outward (the user's flared cylinder)
+    bpy.ops.object.mode_set(mode='EDIT')
+    bm = bmesh.from_edit_mesh(cyl.data)
+    for v in bm.verts:
+        if v.co.z > 0.5:
+            v.co.x *= 1.8
+            v.co.y *= 1.8
+    bmesh.update_edit_mesh(cyl.data)
+    C.view_layer.update()
+    C.evaluated_depsgraph_get()
+    s1 = mesh_stats(evaluated_mesh(fusion))
+    check(cyl.sdf_shape.primitive == 'MESH', "primitive promoted to an editable mesh shape while in Edit Mode")
+    check(s1['max'][0] > 1.6 and s1['volume'] > s0['volume'] * 1.3, f"the fusion follows the flared cap live in Edit Mode (max x {s1['max'][0]:.2f}, volume {s0['volume']:.2f} -> {s1['volume']:.2f})")
+    bpy.ops.object.mode_set(mode='OBJECT')
+    s2 = mesh_stats(evaluated_mesh(fusion))
+    check(abs(s2['volume'] - s1['volume']) < 0.05, "same result after leaving Edit Mode")
+    # Object Mode edit (e.g. a script or sculpt) on another primitive also promotes it
+    box = ops.add_shape(C, fusion, 'BOX', Vector((3.0, 0, 0)))
+    bm = bmesh.new()
+    bm.from_mesh(box.data)
+    for v in bm.verts:
+        if v.co.z > 0:
+            v.co.x *= 0.5
+    bm.to_mesh(box.data)
+    bm.free()
+    box.data.update()
+    C.view_layer.update()
+    C.evaluated_depsgraph_get()
+    check(box.sdf_shape.primitive == 'MESH', "hand-edited box guide promoted to a mesh shape")
+    # but Apply Scale on a primitive is still repaired, not promoted
+    sph = ops.add_shape(C, fusion, 'SPHERE', Vector((-3.0, 0, 0)))
+    sph.scale = (1.5, 1.5, 1.5)
+    for o in C.view_layer.objects:
+        o.select_set(o == sph)
+    C.view_layer.objects.active = sph
+    bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+    C.view_layer.update()
+    C.evaluated_depsgraph_get()
+    check(sph.sdf_shape.primitive == 'SPHERE' and np.allclose(sph.scale, (1.5, 1.5, 1.5), atol=1e-4), "Apply Scale keeps a primitive exact (repaired, not promoted)")
+
+
 def test_cutters_and_guides():
     print("\n[9] cutters always cut, guide display, Shift+D on a shape")
     reset_scene()
@@ -1342,7 +1391,7 @@ def test_timing():
 
 def main():
     t0 = time.perf_counter()
-    for test in (test_field_matches_reference, test_acceptance_flow, test_primitive_volumes, test_placement, test_mesh_shapes, test_mirror_and_hollow, test_post_modifiers, test_smart_topology, test_add_menu, test_shading_and_alignment, test_precise_convert, test_cutters_and_guides, test_duplicate, test_animation_and_apply, test_ramp_family, test_color_blending, test_material_blending, test_timing):
+    for test in (test_field_matches_reference, test_acceptance_flow, test_primitive_volumes, test_placement, test_mesh_shapes, test_mirror_and_hollow, test_post_modifiers, test_smart_topology, test_add_menu, test_shading_and_alignment, test_precise_convert, test_primitive_becomes_editable, test_cutters_and_guides, test_duplicate, test_animation_and_apply, test_ramp_family, test_color_blending, test_material_blending, test_timing):
         try:
             t_start = time.perf_counter()
             test()

@@ -27,7 +27,7 @@ Blender evaluates natively on every platform.  See
 
 ## Installation
 
-1. Download `sdf_fusion-1.11.0.zip` (or build it, see below).
+1. Download `sdf_fusion-1.12.0.zip` (or build it, see below).
 2. Drag and drop the ZIP into a Blender window, or use
    *Edit > Preferences > Get Extensions > (dropdown) > Install from Disk...*
 3. Enable **SDF Fusion** if it is not enabled automatically.
@@ -134,9 +134,11 @@ edited.  When you want real vertex editing, use a **Mesh** shape instead:
 * **Use Selected Objects** turns any selected mesh objects (imported models,
   things you modelled) into shapes of the active fusion, keeping their
   position.  They keep their own mesh data and stay fully editable.
-* **Make Editable** in a shape's box converts a primitive into a mesh shape
-  that looks the same; switching its Primitive back restores the exact
-  formula.
+* Primitives are exact formulas, so their guide mesh is only a guide.  The
+  moment you edit a primitive's vertices (Tab, then move, loop cut, scale a
+  cap...) it turns into a mesh shape automatically and the fusion follows;
+  set its Primitive back to restore the exact formula.  **Make Editable**
+  does the same explicitly.
 * **Release from Fusion** hands a mesh shape back as an ordinary object.
 
 Mesh shapes are converted to a distance field by Blender's own *Mesh to SDF
@@ -214,6 +216,24 @@ Tips
   prefer wireframes.  Shapes can also be selected from the *Shapes* list.
 * The *Shapes* sub-panel has a rebuild button if a tree ever gets out of sync
   (for example after appending objects from another file).
+
+## Updating without restarting Blender
+
+Install the new ZIP (Preferences > Get Extensions > Install from Disk) or let
+the add-on be updated on disk, then run this in Blender's Python console
+(Scripting workspace):
+
+```python
+import bpy, sys
+m = 'bl_ext.user_default.sdf_fusion'
+bpy.ops.preferences.addon_disable(module=m)
+for k in [k for k in sys.modules if k == m or k.startswith(m + '.')]:
+    del sys.modules[k]
+bpy.ops.preferences.addon_enable(module=m)
+```
+
+Existing fusions keep working; click the rebuild icon in the *Shapes*
+sub-panel (or change any setting) to rebuild them with the new version.
 
 ## Testing
 

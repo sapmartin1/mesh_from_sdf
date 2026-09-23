@@ -604,37 +604,44 @@ def unit_proxy_vertices(primitive, tube, top_radius, sides):
     return v
 
 
+def promote_to_mesh(shape):
+    """A primitive whose guide mesh was edited becomes an editable mesh shape."""
+    shape.sdf_shape.primitive = 'MESH'          # keeps the geometry, rebuilds
+
+
 def repair_applied_transform(shape):
-    """Apply Scale/Rotation/Location bakes a transform into the proxy mesh,
-    which would silently change the SDF (sizes come from the object scale).
-    Recover that affine transform from the vertices, fold it back into the
-    object and restore the unit proxy, so nothing visibly changes and the
-    field stays consistent.  Returns True when a repair happened."""
+    """Classify what happened to a primitive's guide mesh.
+
+    Apply Scale/Rotation/Location bakes a transform into the guide mesh,
+    which would silently change the SDF (sizes come from the object scale):
+    that affine transform is recovered from the vertices, folded back into
+    the object and the unit guide restored ('AFFINE').  Anything else the
+    user did to the vertices (Edit Mode, sculpting) means they want to edit
+    the shape ('EDITED'); the caller turns it into a mesh shape.  Returns
+    'SAME', 'AFFINE' or 'EDITED'."""
     st = shape.sdf_shape
     me = shape.data
     if me is None or st.primitive == 'MESH':
-        return False                        # editable meshes are whatever the user makes them
+        return 'SAME'                       # editable meshes are whatever the user makes them
     ref = unit_proxy_vertices(st.primitive, st.tube, st.top_radius, st.sides)
     if len(me.vertices) != len(ref):
-        return False
+        return 'EDITED'
     cur = np.empty(len(ref) * 3)
     me.vertices.foreach_get('co', cur)
     cur = cur.reshape(-1, 3)
     if np.allclose(cur, ref, atol=1e-6):
-        return False
+        return 'SAME'
     A = np.c_[ref, np.ones(len(ref))]
     MT, _res, rank, _sv = np.linalg.lstsq(A, cur, rcond=None)
-    if rank < 4:
-        return False
-    if np.abs(A @ MT - cur).max() > 1e-4 * max(1.0, float(np.abs(cur).max())):
-        return False                        # hand-edited, not an affine change
+    if rank < 4 or np.abs(A @ MT - cur).max() > 1e-4 * max(1.0, float(np.abs(cur).max())):
+        return 'EDITED'
     M = Matrix.Identity(4)
     for r in range(3):
         for c in range(4):
             M[r][c] = float(MT[c][r])
     shape.matrix_world = shape.matrix_world @ M
     fill_proxy_mesh(me, st.primitive, st.tube, st.top_radius, st.sides)
-    return True
+    return 'AFFINE'
 
 
 def dual_contour_bake(context, fusion, guide_mesh, resolution, mesh_detail=None):
