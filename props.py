@@ -237,9 +237,19 @@ class SDFFusionSettings(PropertyGroup):
     steps: IntProperty(
         name="Steps", default=3, min=1, max=32,
         description="Number of steps for the Steps blend mode", update=_fusion_values)
+    shading: EnumProperty(
+        name="Shading", default='AUTO',
+        items=(('AUTO', 'Auto Smooth', 'Sharp creases (box edges) shade sharp, blends and curved parts smooth', 0),
+               ('SMOOTH', 'Smooth', 'Everything smooth shaded (sharp creases show as wavy bands)', 1),
+               ('FLAT', 'Flat', 'Flat shading, shows the raw polygons', 2)),
+        update=_fusion_rebuild)
+    smooth_angle: FloatProperty(
+        name="Sharp Angle", default=0.5235988, min=0.0, max=3.1415927, subtype='ANGLE',
+        description="Edges bent more than this shade sharp (Auto Smooth). Raise it if blends show facets at Low quality",
+        update=_fusion_values)
     mesh_detail: FloatProperty(
-        name="Mesh Detail", default=1.0, min=0.25, soft_max=3.0, max=8.0,
-        description="Resolution of mesh shapes' distance fields relative to the fusion grid: "
+        name="Mesh Detail", default=1.0, min=1.0, soft_max=3.0, max=8.0, step=100,
+        description="Resolution of mesh shapes' distance fields relative to the fusion grid, whole numbers: "
                     "1 matches it, 2 is twice as fine (slower)",
         update=_fusion_values)
     mirror_x: BoolProperty(name="X", default=False, description="Mirror the whole fusion across its local YZ plane", update=_fusion_rebuild)
@@ -249,6 +259,10 @@ class SDFFusionSettings(PropertyGroup):
         name="Hollow", default=0.0, min=0.0, soft_max=0.5, subtype='DISTANCE',
         description="Keep only a wall of this thickness around the fused surface (0 = solid)",
         update=_fusion_values)
+    precise_convert: BoolProperty(
+        name="Precise Edges", default=True,
+        description="On Convert: snap every vertex onto the exact surface and pull crease vertices onto the "
+                    "true edge line, so hard edges come out straight instead of stair-stepped")
     data_version: IntProperty(default=0, options={'HIDDEN'})
     # --- legacy (pre 1.4) settings, only read once by the migration ---
     blend: FloatProperty(default=0.25, min=0.0, options={'HIDDEN'})

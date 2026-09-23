@@ -97,6 +97,14 @@ on your M5 Mac with Blender 5.2 and note anything that misbehaves.
 - [ ] **Release from Fusion** on an imported shape: it becomes a normal,
       renderable object again where it stands.
 
+## 1.10 additions (straight edges)
+
+- [ ] Rotate a box shape 30 degrees: with Shading Auto Smooth its creases
+      look crisp in the viewport, no wavy dark bands.  Switch Shading to
+      Smooth to see the old look.
+- [ ] Convert with Precise Edges on: in Edit Mode the crease vertices lie on
+      a perfectly straight line; with it off they zig-zag.
+
 ## UI / workflow
 
 - [ ] Clicking a row in the *Shapes* sub-panel selects that shape.

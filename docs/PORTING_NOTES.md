@@ -221,9 +221,34 @@ Deviations from upstream, on purpose:
 * Measured: an editable cube's field matches the analytic box within 0.2
   voxels; Mesh Detail 2 halves that again.
 
+## 3f. 1.10.0: straight creases (reported by Martin: "edges wrinkle")
+
+* Measured first: the geometric crease error of a mesh cube (0.027) was
+  nearly the same as an analytic box (0.023), both about half a voxel, so
+  the wrinkle was mostly smooth shading across a marching-cubes staircase.
+* Shading: Auto Smooth by default (Set Shade Smooth on the EDGE domain from
+  Edge Angle > 30 degrees), Smooth and Flat as options.
+* Grid alignment: the fusion grid is snapped to multiples of its voxel
+  size, so mesh shapes' Mesh-to-SDF grids (same lattice) are sampled at
+  stored voxels, not interpolated; a mesh cube now has exactly the analytic
+  box's error.
+* Precise Edges (Convert): vertices are Newton-projected onto the real
+  Geometry Nodes field (evaluated through a temporary sampler object), then
+  vertices whose 1-ring normals disagree by more than 35 degrees are moved to
+  the least-squares intersection of the neighbouring tangent planes (a
+  per-vertex QEF, the dual-contouring idea), then projected once more.
+  Two lessons: the finite-difference stencil must be tiny (voxel/32) or
+  normals next to a crease straddle it and the QEF lands off the surface;
+  and mesh shapes cannot be made exact this way because their field is the
+  voxel grid itself, so the bake samples them 4x finer instead.  Result on
+  two rotated cubes: max surface error 0.027 -> 0.00006, crease vertices on
+  the true edge line 2 -> 556.
+* Follow-up idea: exact distances to mesh shapes' triangles (BVH) at bake
+  time would make their creases exact too.
+
 ## 4. Verified
 
-* `tests/run_tests.py` on Blender 5.1.0 / macOS 26 / Apple M5: 187 checks,
+* `tests/run_tests.py` on Blender 5.1.0 / macOS 26 / Apple M5: 217 checks,
   all passing (primitive maths for all 8 primitives, all 15 operation x
   blend combinations, the Phase 1 acceptance flow, analytic volumes, colour
   and material blending, animation drivers, Apply Transform repair,

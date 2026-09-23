@@ -154,6 +154,10 @@ class SDFF_PT_main(Panel):
         if any(r.object is not None and r.object.sdf_shape.primitive == 'MESH' for r in fs.shapes):
             col.prop(fs, 'mesh_detail', slider=True)
         row = box.row(align=True)
+        row.prop(fs, 'shading', text="")
+        if fs.shading == 'AUTO':
+            row.prop(fs, 'smooth_angle', text="")
+        row = box.row(align=True)
         row.label(text="Mirror")
         row.prop(fs, 'mirror_x', toggle=True)
         row.prop(fs, 'mirror_y', toggle=True)
@@ -170,6 +174,7 @@ class SDFF_PT_main(Panel):
 
         box = layout.box()
         box.prop(fs, 'final_resolution')
+        box.prop(fs, 'precise_convert')
         row = box.row()
         row.scale_y = 1.4
         row.operator('sdf_fusion.convert', icon='MESH_DATA')

@@ -672,8 +672,14 @@ def bounds_pipeline(b, obj_nodes, resolution, pad_radius, global_params, setting
     mx2 = b.vmath('ADD', mx, padv)
     ex2, ey2, ez2 = b.sep(b.vmath('SUBTRACT', mx2, mn2))
     voxel = b.math('DIVIDE', b.max3(ex2, ey2, ez2), resolution)
+    # Snap the grid to multiples of the voxel size: mesh shapes' distance grids
+    # (Mesh to SDF Grid) live on that lattice, so every fusion sample then hits
+    # a stored voxel value instead of an interpolated one (no crease wobble).
+    mn2 = b.vmath('SCALE', b.vmath('FLOOR', b.vmath('DIVIDE', mn2, b.comb(voxel, voxel, voxel))), scale=voxel)
+    ex2, ey2, ez2 = b.sep(b.vmath('SUBTRACT', mx2, mn2))
     detail = b.value(1.0, 'MESH_DETAIL')
-    mesh_voxel = b.math('MAXIMUM', b.math('DIVIDE', voxel, b.math('MAXIMUM', detail, 0.05)), 1e-5)
+    detail_i = b.math('MAXIMUM', b.math('ROUND', detail), 1.0)
+    mesh_voxel = b.math('MAXIMUM', b.math('DIVIDE', voxel, detail_i), 1e-5)
     # the narrow band must cover the blend reach, or blends get truncated
     band_f = b.math('MINIMUM', b.math('ADD', b.math('DIVIDE', reach, mesh_voxel), 4.0), 256.0)
     band = b.node('FunctionNodeFloatToInt')
@@ -681,6 +687,14 @@ def bounds_pipeline(b, obj_nodes, resolution, pad_radius, global_params, setting
     b.link(band_f, band.inputs[0])
     return {'min': mn2, 'max': mx2, 'extent': (ex2, ey2, ez2), 'voxel': voxel,
             'mesh_voxel': mesh_voxel, 'mesh_band': band.outputs[0]}
+
+
+def apply_shell(b, tree, acc):
+    """Hollow: keep only a wall of thickness SHELL around the surface."""
+    shell = tree.nodes['SHELL'].outputs[0]
+    hollow = b.math('SUBTRACT', b.math('ABSOLUTE', acc), shell)
+    on = b.math('GREATER_THAN', shell, 0.0)
+    return b.math('MULTIPLY_ADD', b.math('SUBTRACT', hollow, acc), on, acc)
 
 
 def fold_position(b, settings, position):
@@ -840,11 +854,7 @@ def rebuild(fusion_ob):
     position = fold_position(b, settings, position)
     acc, (acc_color, acc_surface, acc_extra, acc_emission) = build_field(
         b, fusion_ob, shapes, position, gparams, steps, obj_nodes, bounds)
-    # Hollow: keep only a wall of thickness SHELL around the surface
-    shell = tree.nodes['SHELL'].outputs[0]
-    hollow = b.math('SUBTRACT', b.math('ABSOLUTE', acc), shell)
-    on = b.math('GREATER_THAN', shell, 0.0)
-    acc = b.math('MULTIPLY_ADD', b.math('SUBTRACT', hollow, acc), on, acc)
+    acc = apply_shell(b, tree, acc)
 
     def res_axis(extent):
         f = b.math('MAXIMUM', b.math('ADD', b.math('DIVIDE', extent, voxel), 1.0), 2.0)
@@ -853,15 +863,21 @@ def rebuild(fusion_ob):
         b.link(f, n.inputs[0])
         return n.outputs[0]
 
+    # grid points must sit exactly voxel apart: Max = Min + (N - 1) * voxel
+    rx, ry, rz = res_axis(ex2), res_axis(ey2), res_axis(ez2)
+    mx2 = b.vmath('ADD', mn2, b.comb(b.math('MULTIPLY', b.math('SUBTRACT', rx, 1.0), voxel),
+                                     b.math('MULTIPLY', b.math('SUBTRACT', ry, 1.0), voxel),
+                                     b.math('MULTIPLY', b.math('SUBTRACT', rz, 1.0), voxel)))
+
     density = b.neg(acc)
     vc = b.node('GeometryNodeVolumeCube', 'VOLUME_CUBE')
     b.link(density, vc.inputs['Density'])
     vc.inputs['Background'].default_value = -1.0
     b.link(mn2, vc.inputs['Min'])
     b.link(mx2, vc.inputs['Max'])
-    b.link(res_axis(ex2), vc.inputs['Resolution X'])
-    b.link(res_axis(ey2), vc.inputs['Resolution Y'])
-    b.link(res_axis(ez2), vc.inputs['Resolution Z'])
+    b.link(rx, vc.inputs['Resolution X'])
+    b.link(ry, vc.inputs['Resolution Y'])
+    b.link(rz, vc.inputs['Resolution Z'])
 
     grid = b.node('GeometryNodeGetNamedGrid')
     grid.data_type = 'FLOAT'
@@ -875,8 +891,18 @@ def rebuild(fusion_ob):
 
     smooth = b.node('GeometryNodeSetShadeSmooth')
     b.link(g2m.outputs['Mesh'], smooth.inputs[0])
-    smooth.inputs['Shade Smooth'].default_value = True
+    smooth.inputs['Shade Smooth'].default_value = settings.shading != 'FLAT'
     mesh_out = smooth.outputs[0]
+    if settings.shading == 'AUTO':
+        # creases (a cube's edges) shade sharp, blends stay smooth
+        angle = b.value(settings.smooth_angle, 'SMOOTH_ANGLE')
+        ea = b.node('GeometryNodeInputMeshEdgeAngle')
+        sharp = b.math('GREATER_THAN', ea.outputs['Unsigned Angle'], angle)
+        edges = b.node('GeometryNodeSetShadeSmooth', 'SHARP_EDGES')
+        edges.domain = 'EDGE'
+        b.link(mesh_out, edges.inputs[0])
+        b.link(b.math('SUBTRACT', 1.0, sharp), edges.inputs['Shade Smooth'])
+        mesh_out = edges.outputs[0]
 
     if settings.blend_colors:
         # Evaluate the blended colour field at the mesh vertices and store it
@@ -971,6 +997,8 @@ def add_drivers(tree, fusion_ob, shapes):
         _drive(nodes['MESH_DETAIL'].outputs[0], 'default_value', fusion_ob, 'sdf_fusion.mesh_detail')
     if 'SHELL' in nodes:
         _drive(nodes['SHELL'].outputs[0], 'default_value', fusion_ob, 'sdf_fusion.shell')
+    if 'SMOOTH_ANGLE' in nodes:
+        _drive(nodes['SMOOTH_ANGLE'].outputs[0], 'default_value', fusion_ob, 'sdf_fusion.smooth_angle')
     for i, sh in enumerate(shapes):
         st = sh.sdf_shape
         pnode = nodes.get(f'PARAMS_{i}')
@@ -1043,6 +1071,8 @@ def update_values(fusion_ob):
         nodes['MESH_DETAIL'].outputs[0].default_value = settings.mesh_detail
     if 'SHELL' in nodes:
         nodes['SHELL'].outputs[0].default_value = settings.shell
+    if 'SMOOTH_ANGLE' in nodes:
+        nodes['SMOOTH_ANGLE'].outputs[0].default_value = settings.smooth_angle
     sync_material(fusion_ob)
 
 
@@ -1146,7 +1176,30 @@ def evaluate_mesh(fusion_ob, resolution=None, context=None):
     return mesh
 
 
-def build_field_sampler(fusion_ob, sampler_ob, attribute_name='sdf'):
+def sample_field_at(fusion_ob, points, context=None, resolution=None, mesh_detail=None):
+    """Evaluate the fusion's real distance field at ``points`` (N, 3), fusion-local."""
+    import numpy as np
+    context = context or bpy.context
+    me = bpy.data.meshes.new('_sdff_sampler')
+    me.from_pydata([tuple(map(float, p)) for p in points], [], [])
+    ob = bpy.data.objects.new('_sdff_sampler', me)
+    context.scene.collection.objects.link(ob)
+    ob.matrix_world = fusion_ob.matrix_world.copy()
+    ob.hide_render = True
+    tree = build_field_sampler(fusion_ob, ob, 'sdf', resolution, mesh_detail)
+    try:
+        dg = context.evaluated_depsgraph_get()
+        ev = ob.evaluated_get(dg).data
+        out = np.empty(len(points))
+        ev.attributes['sdf'].data.foreach_get('value', out)
+    finally:
+        bpy.data.objects.remove(ob, do_unlink=True)
+        bpy.data.meshes.remove(me)
+        bpy.data.node_groups.remove(tree)
+    return out
+
+
+def build_field_sampler(fusion_ob, sampler_ob, attribute_name='sdf', resolution=None, mesh_detail=None):
     """Test helper: store the fusion's distance field on ``sampler_ob``'s points.
 
     ``sampler_ob`` must share the fusion's world matrix so 'Relative' object
@@ -1165,13 +1218,14 @@ def build_field_sampler(fusion_ob, sampler_ob, attribute_name='sdf'):
     gparams = b.vector_input((settings.radius_scale, settings.fill_scale, 1.0), 'GLOBAL_PARAMS')
     steps = b.value(float(settings.steps), 'GLOBAL_STEPS')
     position = b.node('GeometryNodeInputPosition').outputs[0]
-    resolution = b.integer(settings.live_resolution(), 'RESOLUTION')
+    resolution = b.integer(resolution or settings.live_resolution(), 'RESOLUTION')
     pad_radius = b.value(max_radius(fusion_ob), 'PAD_RADIUS')
     obj_nodes = object_info_nodes(b, shapes)
     bounds = bounds_pipeline(b, obj_nodes, resolution, pad_radius, gparams, settings)
-    tree.nodes['MESH_DETAIL'].outputs[0].default_value = settings.mesh_detail
+    tree.nodes['MESH_DETAIL'].outputs[0].default_value = mesh_detail or settings.mesh_detail
     position = fold_position(b, settings, position)
     acc, _extras = build_field(b, fusion_ob, shapes, position, gparams, steps, obj_nodes, bounds)
+    acc = apply_shell(b, tree, acc)
     store = b.node('GeometryNodeStoreNamedAttribute')
     store.data_type = 'FLOAT'
     store.domain = 'POINT'

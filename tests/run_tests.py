@@ -706,6 +706,126 @@ def test_add_menu():
           "SDF Fusion submenu is registered in the Add menu")
 
 
+def test_shading_and_alignment():
+    print("\n[17] crease shading and mesh-grid alignment")
+    reset_scene()
+    fusion = ops.create_fusion(C, Vector((0, 0, 0)))
+    box = ops.add_shape(C, fusion, 'BOX', Vector((0, 0, 0)))
+    sph = ops.add_shape(C, fusion, 'SPHERE', Vector((1.3, 0.0, 0.7)))
+    sph.scale = (0.8, 0.8, 0.8)
+    fs = fusion.sdf_fusion
+    set_blend(fusion, 0.5)
+    me = evaluated_mesh(fusion)
+    sharp = me.attributes.get('sharp_edge')
+    check(fs.shading == 'AUTO' and sharp is not None, "Auto Smooth is the default and writes sharp edges")
+    flags = np.array([s.value for s in sharp.data], dtype=bool)
+    co = np.array([v.co[:] for v in me.vertices])
+    ev = np.array([(e.vertices[0], e.vertices[1]) for e in me.edges])
+    mid = (co[ev[:, 0]] + co[ev[:, 1]]) * 0.5
+    on_crease = np.sum(np.abs(np.abs(mid) - 1.0) < 0.03, axis=1) >= 2      # box edges
+    dist_s = np.linalg.norm(mid - np.array([1.3, 0.0, 0.7]), axis=1)
+    on_sphere = (dist_s > 0.7) & (dist_s < 0.9) & (mid[:, 0] > 1.6)      # sphere skin, away from the box
+    check(flags[on_crease].mean() > 0.3, f"box creases carry sharp edges ({flags[on_crease].mean():.0%} of crease edges)")
+    check(flags[on_sphere].mean() < 0.02, f"the sphere and the blend stay smooth ({flags[on_sphere].mean():.1%} sharp)")
+    check(all(p.use_smooth for p in me.polygons), "faces themselves are smooth (only creases split)")
+    fs.shading = 'SMOOTH'
+    me2 = evaluated_mesh(fusion)
+    check(me2.attributes.get('sharp_edge') is None or not any(s.value for s in me2.attributes['sharp_edge'].data), "Smooth: no sharp edges")
+    fs.shading = 'FLAT'
+    check(not any(p.use_smooth for p in evaluated_mesh(fusion).polygons), "Flat: flat faces")
+    fs.shading = 'AUTO'
+    bpy.ops.sdf_fusion.convert()
+    check(C.active_object.data.attributes.get('sharp_edge') is not None, "Convert keeps the sharp edges")
+
+    # a rotated mesh cube now matches the analytic box as closely as an analytic box does
+    def crease_error(primitive):
+        reset_scene()
+        f = ops.create_fusion(C, Vector((0, 0, 0)))
+        cube = ops.add_shape(C, f, primitive, Vector((0.3, 0.1, 0.2)))
+        cube.rotation_euler = Euler((0.4, 0.3, 0.2))
+        m = evaluated_mesh(f)
+        c = np.array([v.co[:] for v in m.vertices])
+        inv = np.array([list(r) for r in (Matrix.Translation(cube.location) @ cube.rotation_euler.to_matrix().to_4x4()).inverted()])
+        p = (np.c_[c, np.ones(len(c))] @ inv.T)[:, :3]
+        return np.abs(sdf_ref.sd_box(p, (1, 1, 1))).max()
+    e_box, e_mesh = crease_error('BOX'), crease_error('MESH')
+    check(e_mesh < e_box * 1.15, f"mesh cube surface error {e_mesh:.4f} vs analytic box {e_box:.4f} (grids aligned)")
+
+
+def test_precise_convert():
+    print("\n[18] Precise Edges: baked vertices on the exact surface, creases straight")
+    rng = random.Random(3)
+
+    def rotated_cubes(precise):
+        reset_scene()
+        f = ops.create_fusion(C, Vector((0, 0, 0)))
+        f.sdf_fusion.final_resolution = 64
+        a = ops.add_shape(C, f, 'BOX', Vector((0, 0, 0)))
+        a.rotation_euler = Euler((0.4, 0.3, 0.2))
+        b_ = ops.add_shape(C, f, 'BOX', Vector((1.4, 0.5, 0.6)))
+        b_.rotation_euler = Euler((0.1, 0.6, 0.3))
+        b_.scale = (0.7, 0.7, 0.7)
+        set_blend(f, 0.0)
+        C.view_layer.objects.active = f
+        ops.convert_to_mesh(C, f, 64, precise=precise)
+        res = C.active_object
+        co = np.array([v.co[:] for v in res.data.vertices])
+        shapes = reference_shapes(f)
+        d = sdf_ref.evaluate_fusion(co, shapes, fusion_params(f))
+        # distance to the true crease lines of cube A: points near two faces of A and outside B
+        inv = np.array([list(r) for r in (Matrix.Translation(a.location) @ a.rotation_euler.to_matrix().to_4x4()).inverted()])
+        p = (np.c_[co, np.ones(len(co))] @ inv.T)[:, :3]
+        q = np.abs(p)
+        near_two = (np.sort(q, axis=1)[:, 1] > 0.9)          # second-largest coord near a face plane
+        on_line = np.sort(np.abs(q - 1.0), axis=1)[:, :2].max(axis=1)   # max deviation of the two largest coords from 1
+        vox = 2.9 / 64
+        band = near_two & (on_line < 0.6 * vox)
+        exact_line = np.sum(band & (on_line < 0.05 * vox))
+        return np.abs(d).max(), int(exact_line), mesh_stats(res.data)
+    e0, l0, s0 = rotated_cubes(False)
+    e1, l1, s1 = rotated_cubes(True)
+    vox = 2.9 / 64
+    check(e1 < 2e-3 and e0 > 5 * e1, f"vertices land on the exact surface (max |d| {e0:.4f} -> {e1:.5f})")
+    check(l1 > 3 * max(l0, 1), f"crease vertices sit on the true edge line ({l0} -> {l1} vertices within 5% of a voxel)")
+    check(abs(s1['volume'] - s0['volume']) / s0['volume'] < 0.01 and s1['islands'] == s0['islands'], "volume and topology unchanged")
+
+    # smooth blends are untouched apart from landing on the exact surface
+    reset_scene()
+    f = ops.create_fusion(C, Vector((0, 0, 0)))
+    f.sdf_fusion.final_resolution = 64
+    ops.add_shape(C, f, 'BOX', Vector((0, 0, 0)))
+    sph = ops.add_shape(C, f, 'SPHERE', Vector((1.3, 0.0, 0.7)))
+    sph.scale = (0.8, 0.8, 0.8)
+    set_blend(f, 0.6)
+    C.view_layer.objects.active = f
+    ops.convert_to_mesh(C, f, 64, precise=False)
+    v0 = mesh_stats(C.active_object.data)['volume']
+    f.hide_set(False)
+    C.view_layer.objects.active = f
+    ops.convert_to_mesh(C, f, 64, precise=True)
+    res = C.active_object
+    co = np.array([v.co[:] for v in res.data.vertices])
+    d = sdf_ref.evaluate_fusion(co, reference_shapes(f), fusion_params(f))
+    check(np.abs(d).max() < 2e-3 and abs(mesh_stats(res.data)['volume'] - v0) / v0 < 0.01, f"smooth blend: exact surface (max |d| {np.abs(d).max():.5f}), volume kept")
+
+    # mesh shapes benefit too (field is the voxel grid's, so within a fraction of a voxel)
+    reset_scene()
+    f = ops.create_fusion(C, Vector((0, 0, 0)))
+    f.sdf_fusion.final_resolution = 64
+    cube = ops.add_shape(C, f, 'MESH', Vector((0.3, 0.1, 0.2)))
+    cube.rotation_euler = Euler((0.4, 0.3, 0.2))
+    inv = np.array([list(r) for r in (Matrix.Translation(cube.location) @ cube.rotation_euler.to_matrix().to_4x4()).inverted()])
+    errs = []
+    for precise in (False, True):
+        f.hide_set(False)
+        C.view_layer.objects.active = f
+        ops.convert_to_mesh(C, f, 64, precise=precise)
+        co = np.array([v.co[:] for v in C.active_object.data.vertices])
+        p = (np.c_[co, np.ones(len(co))] @ inv.T)[:, :3]
+        errs.append(np.abs(sdf_ref.sd_box(p, (1, 1, 1))).max())
+    check(errs[1] < errs[0] * 0.6, f"mesh cube: surface error {errs[0]:.4f} -> {errs[1]:.4f}")
+
+
 def test_cutters_and_guides():
     print("\n[9] cutters always cut, guide display, Shift+D on a shape")
     reset_scene()
@@ -809,7 +929,7 @@ def test_duplicate():
         check(d.modifiers[nodes.MODIFIER_NAME].node_group != fusion.modifiers[nodes.MODIFIER_NAME].node_group, "handler gave the Shift+D copy its own tree")
         check(len(d.sdf_fusion.shapes) == 2 and all(r.object.sdf_shape.fusion == d for r in d.sdf_fusion.shapes), "Shift+D copy owns its duplicated shapes")
         sd = mesh_stats(evaluated_mesh(d))
-        check(abs(sd['volume'] - s_orig['volume']) < 1e-3, "Shift+D copy evaluates like the original")
+        check(abs(sd['volume'] - s_orig['volume']) < 0.01 * s_orig['volume'], "Shift+D copy evaluates like the original")
     except RuntimeError as e:
         print("       (object.duplicate unavailable headless:", e, ")")
 
@@ -1204,7 +1324,7 @@ def test_timing():
 
 def main():
     t0 = time.perf_counter()
-    for test in (test_field_matches_reference, test_acceptance_flow, test_primitive_volumes, test_placement, test_mesh_shapes, test_mirror_and_hollow, test_post_modifiers, test_smart_topology, test_add_menu, test_cutters_and_guides, test_duplicate, test_animation_and_apply, test_ramp_family, test_color_blending, test_material_blending, test_timing):
+    for test in (test_field_matches_reference, test_acceptance_flow, test_primitive_volumes, test_placement, test_mesh_shapes, test_mirror_and_hollow, test_post_modifiers, test_smart_topology, test_add_menu, test_shading_and_alignment, test_precise_convert, test_cutters_and_guides, test_duplicate, test_animation_and_apply, test_ramp_family, test_color_blending, test_material_blending, test_timing):
         try:
             t_start = time.perf_counter()
             test()

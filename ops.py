@@ -637,8 +637,100 @@ def repair_applied_transform(shape):
     return True
 
 
-def convert_to_mesh(context, fusion, resolution, keep_setup=True, hide_setup=True):
+def sharpen_baked_mesh(context, fusion, mesh, resolution, crease_angle=35.0, iterations=4):
+    """Make a baked mesh exact.
+
+    Grid extraction only places vertices within half a voxel of the surface,
+    which turns sharp creases into staircases.  Step 1 projects every vertex
+    onto the true zero surface of the fusion's field (Newton steps against the
+    real Geometry Nodes field).  Step 2 finds vertices whose neighbourhood
+    normals disagree (creases, corners) and moves them to the point that best
+    satisfies all neighbouring tangent planes (a small QEF, the dual-contouring
+    idea), which puts them exactly on the crease line.
+    """
+    n = len(mesh.vertices)
+    if n == 0:
+        return 0
+    co = np.empty(n * 3)
+    mesh.vertices.foreach_get('co', co)
+    co = co.reshape(-1, 3)
+    ext = co.max(axis=0) - co.min(axis=0)
+    voxel = float(ext.max()) / max(1, int(resolution))
+    # a tiny stencil: normals sampled next to a crease must not straddle it
+    h = voxel / 32.0
+    offsets = np.array([[h, 0, 0], [-h, 0, 0], [0, h, 0], [0, -h, 0], [0, 0, h], [0, 0, -h]])
+    max_step = 1.5 * voxel
+
+    # mesh shapes are only as exact as their voxel field: sample them 4x finer for the bake
+    detail = min(8.0, max(1.0, round(fusion.sdf_fusion.mesh_detail)) * 4.0)
+
+    def field_and_grad(p):
+        pts = np.concatenate([p] + [p + o for o in offsets])
+        vals = nodes.sample_field_at(fusion, pts, context, resolution, detail).reshape(7, n)
+        g = np.stack([vals[1] - vals[2], vals[3] - vals[4], vals[5] - vals[6]], axis=1) / (2.0 * h)
+        return vals[0], g
+
+    def project(p, rounds):
+        for _ in range(rounds):
+            d, g = field_and_grad(p)
+            g2 = np.maximum(np.sum(g * g, axis=1), 1e-12)
+            step = (d / g2)[:, None] * g
+            ln = np.linalg.norm(step, axis=1)
+            step *= np.minimum(1.0, max_step / np.maximum(ln, 1e-12))[:, None]
+            p = p - step
+        return p
+
+    # 1. project onto the exact surface
+    co = project(co, iterations)
+    d, g = field_and_grad(co)
+    nrm = g / np.maximum(np.linalg.norm(g, axis=1), 1e-12)[:, None]
+
+    # 2. crease vertices onto the crease line
+    ne = len(mesh.edges)
+    ev = np.empty(ne * 2, dtype=np.int64)
+    mesh.edges.foreach_get('vertices', ev)
+    ev = ev.reshape(-1, 2)
+    src = np.concatenate([ev[:, 0], ev[:, 1]])
+    dst = np.concatenate([ev[:, 1], ev[:, 0]])
+    order = np.argsort(src, kind='stable')
+    src, dst = src[order], dst[order]
+    starts = np.searchsorted(src, np.arange(n + 1))
+    dots = np.sum(nrm[src] * nrm[dst], axis=1)
+    min_dot = np.full(n, 1.0)
+    np.minimum.at(min_dot, src, dots)
+    crease = np.nonzero(min_dot < math.cos(math.radians(crease_angle)))[0]
+    lam = 0.05
+    moved = 0
+    for i in crease:
+        idx = np.concatenate([[i], dst[starts[i]:starts[i + 1]]])
+        N = nrm[idx]
+        P = co[idx]
+        A = N.T @ N + lam * np.eye(3)
+        rhs = N.T @ np.sum(N * P, axis=1) + lam * co[i]
+        try:
+            x = np.linalg.solve(A, rhs)
+        except np.linalg.LinAlgError:
+            continue
+        delta = x - co[i]
+        ln = float(np.linalg.norm(delta))
+        if ln > max_step:
+            delta *= max_step / ln
+        co[i] = co[i] + delta
+        moved += 1
+    # 3. the snapped vertices sit on the crease line; make sure every vertex is
+    # exactly on the surface again (no-op for those already on it)
+    co = project(co, 2)
+    mesh.vertices.foreach_set('co', co.ravel())
+    mesh.update()
+    return moved
+
+
+def convert_to_mesh(context, fusion, resolution, keep_setup=True, hide_setup=True, precise=None):
     mesh = nodes.evaluate_mesh(fusion, resolution, context)
+    if precise is None:
+        precise = fusion.sdf_fusion.precise_convert
+    if precise:
+        sharpen_baked_mesh(context, fusion, mesh, resolution)
     _strip_empty_material_slots(mesh)
     mesh.name = f"{fusion.name} Mesh"
     result = bpy.data.objects.new(f"{fusion.name} Mesh", mesh)

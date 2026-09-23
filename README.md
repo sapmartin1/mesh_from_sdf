@@ -27,7 +27,7 @@ Blender evaluates natively on every platform.  See
 
 ## Installation
 
-1. Download `sdf_fusion-1.9.0.zip` (or build it, see below).
+1. Download `sdf_fusion-1.10.0.zip` (or build it, see below).
 2. Drag and drop the ZIP into a Blender window, or use
    *Edit > Preferences > Get Extensions > (dropdown) > Install from Disk...*
 3. Enable **SDF Fusion** if it is not enabled automatically.
@@ -73,6 +73,7 @@ SDF Fusion
     Quality        Low / Medium / High / Custom     (preview resolution)
     Smart Topology polygons only where the surface curves (flat = few, seams = dense)
     Live Update    pause the live mesh on heavy scenes
+    Shading        Auto Smooth (creases sharp, blends smooth) / Smooth / Flat
     Blend Materials  per-shape colour and surface values that cross-fade
     Material         the fusion's material
     (duplicate icon) copy the fusion with all its shapes
@@ -116,7 +117,10 @@ SDF Fusion
    radius and its Z scale its half height.  Rotation and location work as
    for any object.  The result follows live.
 6. Set **Quality** low while modelling large scenes, then set **Final
-   Resolution** and click **Convert to Mesh**.  A new, ordinary mesh object
+   Resolution** and click **Convert to Mesh**.  With **Precise Edges** on
+   (default) every baked vertex is projected onto the exact surface and
+   crease vertices are pulled onto the true edge line, so hard edges of
+   primitives come out perfectly straight instead of stair-stepped.  A new, ordinary mesh object
    is created at the final resolution; the fusion setup is hidden but kept
    so you can keep editing and convert again.
 
@@ -142,6 +146,16 @@ faces), or the field is unreliable and the panel warns; and mesh fields are
 voxel based, so **Mesh Detail** in the fusion box raises their resolution
 when you need crisper edges (at some cost in speed).  Because the geometry
 is used as is, Apply Scale / Rotation on a mesh shape is simply allowed.
+
+### Why edges can look wavy, and what fixes it
+
+The live mesh is extracted from a voxel grid, so a sharp crease is a tiny
+staircase (up to half a voxel).  Smooth shading across that staircase looks
+like wrinkles; **Shading: Auto Smooth** (default) shades creases sharp and
+blends smooth, which removes the effect.  Higher **Quality** shrinks the
+steps.  **Precise Edges** on Convert makes hard edges of primitives exactly
+straight.  Mesh shapes are limited by their own voxel field: raise **Mesh
+Detail** (the precise bake samples them four times finer automatically).
 
 ### Modifiers without converting
 
