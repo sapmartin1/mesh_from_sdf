@@ -19,7 +19,7 @@ class SDFF_UL_shapes(UIList):
         row = layout.row(align=True)
         icon_name = {'BOX': 'MESH_CUBE', 'SPHERE': 'MESH_UVSPHERE', 'CYLINDER': 'MESH_CYLINDER',
                      'TORUS': 'MESH_TORUS', 'CONE': 'MESH_CONE', 'CAPSULE': 'MESH_CAPSULE',
-                     'PYRAMID': 'CONE', 'PRISM': 'MESH_ICOSPHERE'}.get(st.primitive, 'MESH_DATA')
+                     'PYRAMID': 'CONE', 'PRISM': 'MESH_ICOSPHERE', 'MESH': 'EDITMODE_HLT'}.get(st.primitive, 'MESH_DATA')
         row.prop(st, 'include', text="")
         row.label(text=ob.name, icon=icon_name)
         row.prop(st, 'operation', text="", emboss=False, icon_only=True)
@@ -50,6 +50,9 @@ class SDFF_PT_main(Panel):
         row = col.row(align=True)
         row.operator('sdf_fusion.add_shape', text="Pyramid", icon='CONE').primitive = 'PYRAMID'
         row.operator('sdf_fusion.add_shape', text="Prism", icon='MESH_ICOSPHERE').primitive = 'PRISM'
+        row.operator('sdf_fusion.add_shape', text="Mesh", icon='EDITMODE_HLT').primitive = 'MESH'
+        row = col.row(align=True)
+        row.operator('sdf_fusion.adopt_selected', text="Use Selected Objects", icon='IMPORT')
         row.operator('sdf_fusion.new_fusion', text="", icon='ADD')
 
         if fusion is None:
@@ -77,6 +80,16 @@ class SDFF_PT_main(Panel):
             size_label = {'SPHERE': "Diameter", 'TORUS': "Outer Size"}.get(st.primitive, "Size")
             col = box.column(align=True)
             col.prop(shape, 'dimensions', text=size_label)
+            if st.primitive == 'MESH':
+                box.label(text="Editable mesh: Tab to edit, loop cut, sculpt", icon='EDITMODE_HLT')
+                if not ops.mesh_is_closed(shape.data):
+                    warn = box.row()
+                    warn.alert = True
+                    warn.label(text="Mesh is not closed: field may be unreliable", icon='ERROR')
+                row = box.row(align=True)
+                row.operator('sdf_fusion.release_shape', icon='UNLINKED')
+            else:
+                box.operator('sdf_fusion.make_editable', icon='EDITMODE_HLT')
             if st.primitive == 'PRISM':
                 box.prop(st, 'sides')
             if st.primitive in {'BOX', 'CYLINDER', 'PRISM'}:
@@ -114,6 +127,8 @@ class SDFF_PT_main(Panel):
         if fs.quality == 'CUSTOM':
             col.prop(fs, 'resolution')
         col.prop(fs, 'adaptivity', slider=True)
+        if any(r.object is not None and r.object.sdf_shape.primitive == 'MESH' for r in fs.shapes):
+            col.prop(fs, 'mesh_detail', slider=True)
         col.prop(fs, 'live', toggle=True, icon='PLAY' if fs.live else 'PAUSE')
         row = box.row(align=True)
         row.prop(fs, 'guide_display', expand=True)

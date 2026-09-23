@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "sdf_fusion"
-version = "1.4.1"
+version = "1.5.0"
 name = "SDF Fusion"
 tagline = "Melt boxes, spheres and cylinders together with live blending"
 maintainer = "Martin Sap <martin@simonwhistler.com>"

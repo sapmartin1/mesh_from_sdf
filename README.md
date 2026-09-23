@@ -27,7 +27,7 @@ Blender evaluates natively on every platform.  See
 
 ## Installation
 
-1. Download `sdf_fusion-1.4.1.zip` (or build it, see below).
+1. Download `sdf_fusion-1.5.0.zip` (or build it, see below).
 2. Drag and drop the ZIP into a Blender window, or use
    *Edit > Preferences > Get Extensions > (dropdown) > Install from Disk...*
 3. Enable **SDF Fusion** if it is not enabled automatically.
@@ -47,10 +47,12 @@ The sidebar tab is the whole interface:
 SDF Fusion
   [ Box ] [ Sphere ] [ Cylinder ]
   [ Torus ] [ Cone ] [ Capsule ]
-  [ Pyramid ] [ Prism ] [+]
+  [ Pyramid ] [ Prism ] [ Mesh ]
+  [ Use Selected Objects ] [+]
 
   <active shape>
-    Primitive      Box / Sphere / Cylinder / Torus / Cone / Capsule / Pyramid / Prism
+    Primitive      Box / Sphere / Cylinder / Torus / Cone / Capsule / Pyramid / Prism / Mesh (editable)
+    Make Editable  turn a primitive into an editable mesh shape
     Operation      Union | Subtract | Intersect
     Radius         how far this shape's blend reaches
     Blend          how much the ramp fills in (1 = full quarter-pipe)
@@ -64,6 +66,7 @@ SDF Fusion
     Radius x       master multiplier for every shape's Radius
     Blend x        master multiplier for every shape's Blend
     Blend Mode     Ramp / Steps / Flat Bevel
+    Mesh Detail    resolution of mesh shapes' fields (shown when a mesh shape exists)
     Quality        Low / Medium / High / Custom     (preview resolution)
     Adaptivity     merge flat areas
     Live Update    pause the live mesh on heavy scenes
@@ -113,6 +116,29 @@ SDF Fusion
    Resolution** and click **Convert to Mesh**.  A new, ordinary mesh object
    is created at the final resolution; the fusion setup is hidden but kept
    so you can keep editing and convert again.
+
+### Editable and imported meshes
+
+Primitives are exact formulas, so their guide meshes are not meant to be
+edited.  When you want real vertex editing, use a **Mesh** shape instead:
+
+* **Mesh** (button) adds an editable cube shape.  Select it, press **Tab**,
+  loop cut, extrude, move vertices, or sculpt it: the fusion follows live.
+* **Use Selected Objects** turns any selected mesh objects (imported models,
+  things you modelled) into shapes of the active fusion, keeping their
+  position.  They keep their own mesh data and stay fully editable.
+* **Make Editable** in a shape's box converts a primitive into a mesh shape
+  that looks the same; switching its Primitive back restores the exact
+  formula.
+* **Release from Fusion** hands a mesh shape back as an ordinary object.
+
+Mesh shapes are converted to a distance field by Blender's own *Mesh to SDF
+Grid* node, so they blend, subtract and colour exactly like primitives.  Two
+things to know: the mesh should be **closed** (every edge shared by two
+faces), or the field is unreliable and the panel warns; and mesh fields are
+voxel based, so **Mesh Detail** in the fusion box raises their resolution
+when you need crisper edges (at some cost in speed).  Because the geometry
+is used as is, Apply Scale / Rotation on a mesh shape is simply allowed.
 
 ### Materials
 

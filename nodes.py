@@ -32,7 +32,7 @@ GRID_NAME = "density"
 EPS_BLEND = 1e-4
 SQRT05 = 0.70710678118
 
-PRIMITIVES = ('BOX', 'SPHERE', 'CYLINDER', 'TORUS', 'CONE', 'CAPSULE', 'PYRAMID', 'PRISM')
+PRIMITIVES = ('BOX', 'SPHERE', 'CYLINDER', 'TORUS', 'CONE', 'CAPSULE', 'PYRAMID', 'PRISM', 'MESH')
 OPERATIONS = ('UNION', 'SUBTRACT', 'INTERSECT')
 
 
@@ -639,7 +639,49 @@ def _ensure_interface(tree):
         tree.interface.new_socket('Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
 
 
-def build_field(b, fusion_ob, shapes, position, global_params, global_steps):
+def object_info_nodes(b, shapes):
+    """One Object Info node per shape (transform + geometry in fusion space)."""
+    out = []
+    for i, sh in enumerate(shapes):
+        oi = b.node('GeometryNodeObjectInfo', f'OBJ_{i}')
+        oi.transform_space = 'RELATIVE'
+        oi.inputs['Object'].default_value = sh
+        oi.inputs['As Instance'].default_value = False
+        out.append(oi)
+    return out
+
+
+def bounds_pipeline(b, obj_nodes, resolution, pad_radius, global_params):
+    """Padded bounds of all shapes, the cubic voxel size, and the voxel size /
+    band width used for mesh shapes' distance fields."""
+    join = b.node('GeometryNodeJoinGeometry', 'BOUNDS_JOIN')
+    for oi in obj_nodes:
+        b.tree.links.new(oi.outputs['Geometry'], join.inputs[0])
+    bbox = b.node('GeometryNodeBoundBox')
+    b.link(join.outputs[0], bbox.inputs[0])
+    mn, mx = bbox.outputs['Min'], bbox.outputs['Max']
+    ex, ey, ez = b.sep(b.vmath('SUBTRACT', mx, mn))
+    voxel0 = b.math('DIVIDE', b.max3(ex, ey, ez), resolution)
+    gscale_r, _gscale_t, _gz = b.sep(global_params)
+    reach = b.math('MULTIPLY', pad_radius, gscale_r)
+    pad = b.math('ADD', reach, b.math('MULTIPLY_ADD', voxel0, 2.0, 0.001))
+    padv = b.comb(pad, pad, pad)
+    mn2 = b.vmath('SUBTRACT', mn, padv)
+    mx2 = b.vmath('ADD', mx, padv)
+    ex2, ey2, ez2 = b.sep(b.vmath('SUBTRACT', mx2, mn2))
+    voxel = b.math('DIVIDE', b.max3(ex2, ey2, ez2), resolution)
+    detail = b.value(1.0, 'MESH_DETAIL')
+    mesh_voxel = b.math('MAXIMUM', b.math('DIVIDE', voxel, b.math('MAXIMUM', detail, 0.05)), 1e-5)
+    # the narrow band must cover the blend reach, or blends get truncated
+    band_f = b.math('MINIMUM', b.math('ADD', b.math('DIVIDE', reach, mesh_voxel), 4.0), 256.0)
+    band = b.node('FunctionNodeFloatToInt')
+    band.rounding_mode = 'CEILING'
+    b.link(band_f, band.inputs[0])
+    return {'min': mn2, 'max': mx2, 'extent': (ex2, ey2, ez2), 'voxel': voxel,
+            'mesh_voxel': mesh_voxel, 'mesh_band': band.outputs[0]}
+
+
+def build_field(b, fusion_ob, shapes, position, global_params, global_steps, obj_nodes, bounds):
     """Emit the distance field for ``shapes``; returns the accumulated socket.
 
     Shared by the modifier tree and by the test-suite's field sampler.
@@ -659,28 +701,43 @@ def build_field(b, fusion_ob, shapes, position, global_params, global_steps):
         extra = b.vector_input((st.ior, st.emission_strength, 0.0), f'EXTRA_{i}')
         emission = b.color_input(st.emission_color, f'EMISSION_{i}')
         params = b.vmath('MULTIPLY', b.vector_input((st.radius, st.fill, 0.0), f'PARAMS_{i}'), global_params)
-        oi = b.node('GeometryNodeObjectInfo', f'OBJ_{i}')
-        oi.transform_space = 'RELATIVE'
-        oi.inputs['Object'].default_value = sh
-        oi.inputs['As Instance'].default_value = False
-        sep = b.node('FunctionNodeSeparateTransform')
-        b.link(oi.outputs['Transform'], sep.inputs[0])
-        rigid = b.node('FunctionNodeCombineTransform')
-        b.link(sep.outputs['Translation'], rigid.inputs['Translation'])
-        b.link(sep.outputs['Rotation'], rigid.inputs['Rotation'])
-        rigid.inputs['Scale'].default_value = (1.0, 1.0, 1.0)
-        inv = b.node('FunctionNodeInvertMatrix')
-        b.link(rigid.outputs[0], inv.inputs[0])
-        tp = b.node('FunctionNodeTransformPoint')
-        b.link(position, tp.inputs['Vector'])
-        b.link(inv.outputs['Matrix'], tp.inputs['Transform'])
+        oi = obj_nodes[i]
+        if st.primitive == 'MESH':
+            # any closed mesh: Blender's own mesh -> SDF grid, sampled at Position.
+            # Object Info already put the geometry in fusion space, so no
+            # transform handling (and no scale approximation) is needed.
+            m2s = b.node('GeometryNodeMeshToSDFGrid', f'MESH_SDF_{i}')
+            b.link(oi.outputs['Geometry'], m2s.inputs['Mesh'])
+            b.link(bounds['mesh_voxel'], m2s.inputs['Voxel Size'])
+            b.link(bounds['mesh_band'], m2s.inputs['Band Width'])
+            smp = b.node('GeometryNodeSampleGrid')
+            smp.data_type = 'FLOAT'
+            b.link(m2s.outputs['SDF Grid'], smp.inputs['Grid'])
+            b.link(position, smp.inputs['Position'])
+            try:
+                smp.inputs['Interpolation'].default_value = 'TRILINEAR'
+            except Exception:
+                pass
+            d = smp.outputs['Value']
+        else:
+            sep = b.node('FunctionNodeSeparateTransform')
+            b.link(oi.outputs['Transform'], sep.inputs[0])
+            rigid = b.node('FunctionNodeCombineTransform')
+            b.link(sep.outputs['Translation'], rigid.inputs['Translation'])
+            b.link(sep.outputs['Rotation'], rigid.inputs['Rotation'])
+            rigid.inputs['Scale'].default_value = (1.0, 1.0, 1.0)
+            inv = b.node('FunctionNodeInvertMatrix')
+            b.link(rigid.outputs[0], inv.inputs[0])
+            tp = b.node('FunctionNodeTransformPoint')
+            b.link(position, tp.inputs['Vector'])
+            b.link(inv.outputs['Matrix'], tp.inputs['Transform'])
 
-        prim = b.group(primitive_group(st.primitive), f'PRIM_{i}')
-        b.link(tp.outputs[0], prim.inputs['Position'])
-        b.link(sep.outputs['Scale'], prim.inputs['Scale'])
-        prim.inputs['Rounding'].default_value = st.rounding
-        prim.inputs['Param'].default_value = shape_param(st)
-        d = prim.outputs['Distance']
+            prim = b.group(primitive_group(st.primitive), f'PRIM_{i}')
+            b.link(tp.outputs[0], prim.inputs['Position'])
+            b.link(sep.outputs['Scale'], prim.inputs['Scale'])
+            prim.inputs['Rounding'].default_value = st.rounding
+            prim.inputs['Param'].default_value = shape_param(st)
+            d = prim.outputs['Distance']
 
         if acc is None:
             acc = d
@@ -742,25 +799,16 @@ def rebuild(fusion_ob):
     pad_radius = b.value(max_radius(fusion_ob), 'PAD_RADIUS')
     position = b.node('GeometryNodeInputPosition').outputs[0]
 
-    acc, (acc_color, acc_surface, acc_extra, acc_emission) = build_field(b, fusion_ob, shapes, position, gparams, steps)
+    # bounds: union of the shape meshes (already in fusion-local space)
+    obj_nodes = object_info_nodes(b, shapes)
+    bounds = bounds_pipeline(b, obj_nodes, resolution, pad_radius, gparams)
+    tree.nodes['MESH_DETAIL'].outputs[0].default_value = settings.mesh_detail
+    mn2, mx2 = bounds['min'], bounds['max']
+    ex2, ey2, ez2 = bounds['extent']
+    voxel = bounds['voxel']
 
-    # bounds: union of the proxy meshes (already in fusion-local space)
-    join = b.node('GeometryNodeJoinGeometry', 'BOUNDS_JOIN')
-    for i in range(len(shapes)):
-        oi = tree.nodes[f'OBJ_{i}']
-        tree.links.new(oi.outputs['Geometry'], join.inputs[0])
-    bbox = b.node('GeometryNodeBoundBox')
-    b.link(join.outputs[0], bbox.inputs[0])
-    mn, mx = bbox.outputs['Min'], bbox.outputs['Max']
-    ex, ey, ez = b.sep(b.vmath('SUBTRACT', mx, mn))
-    voxel0 = b.math('DIVIDE', b.max3(ex, ey, ez), resolution)
-    gscale_r, _gscale_t, _gz = b.sep(gparams)
-    pad = b.math('ADD', b.math('MULTIPLY', pad_radius, gscale_r), b.math('MULTIPLY_ADD', voxel0, 2.0, 0.001))
-    padv = b.comb(pad, pad, pad)
-    mn2 = b.vmath('SUBTRACT', mn, padv)
-    mx2 = b.vmath('ADD', mx, padv)
-    ex2, ey2, ez2 = b.sep(b.vmath('SUBTRACT', mx2, mn2))
-    voxel = b.math('DIVIDE', b.max3(ex2, ey2, ez2), resolution)
+    acc, (acc_color, acc_surface, acc_extra, acc_emission) = build_field(
+        b, fusion_ob, shapes, position, gparams, steps, obj_nodes, bounds)
 
     def res_axis(extent):
         f = b.math('MAXIMUM', b.math('ADD', b.math('DIVIDE', extent, voxel), 1.0), 2.0)
@@ -879,17 +927,20 @@ def add_drivers(tree, fusion_ob, shapes):
     _drive(nodes['GLOBAL_PARAMS'], 'vector', fusion_ob, 'sdf_fusion.fill_scale', 1)
     _drive(nodes['GLOBAL_STEPS'].outputs[0], 'default_value', fusion_ob, 'sdf_fusion.steps')
     _drive(nodes['ADAPTIVITY'].outputs[0], 'default_value', fusion_ob, 'sdf_fusion.adaptivity')
+    if 'MESH_DETAIL' in nodes:
+        _drive(nodes['MESH_DETAIL'].outputs[0], 'default_value', fusion_ob, 'sdf_fusion.mesh_detail')
     for i, sh in enumerate(shapes):
         st = sh.sdf_shape
         pnode = nodes.get(f'PARAMS_{i}')
         if pnode is not None:
             _drive(pnode, 'vector', sh, 'sdf_shape.radius', 0)
             _drive(pnode, 'vector', sh, 'sdf_shape.fill', 1)
-        prim = nodes[f'PRIM_{i}']
-        _drive(prim.inputs['Rounding'], 'default_value', sh, 'sdf_shape.rounding')
-        ppath = _param_path(st)
-        if ppath:
-            _drive(prim.inputs['Param'], 'default_value', sh, ppath)
+        prim = nodes.get(f'PRIM_{i}')
+        if prim is not None:
+            _drive(prim.inputs['Rounding'], 'default_value', sh, 'sdf_shape.rounding')
+            ppath = _param_path(st)
+            if ppath:
+                _drive(prim.inputs['Param'], 'default_value', sh, ppath)
         cnode = nodes.get(f'COLOR_{i}')
         if cnode is not None:
             prop = 'value' if hasattr(cnode, 'value') else 'color'
@@ -946,6 +997,8 @@ def update_values(fusion_ob):
     nodes['RESOLUTION'].integer = settings.live_resolution()
     nodes['ADAPTIVITY'].outputs[0].default_value = settings.adaptivity
     nodes['PAD_RADIUS'].outputs[0].default_value = max_radius(fusion_ob)
+    if 'MESH_DETAIL' in nodes:
+        nodes['MESH_DETAIL'].outputs[0].default_value = settings.mesh_detail
     sync_material(fusion_ob)
 
 
@@ -958,11 +1011,12 @@ def update_shape_values(fusion_ob, shape_ob):
         return
     st = shape_ob.sdf_shape
     prim = tree.nodes.get(f'PRIM_{i}')
-    if prim is None:
+    if prim is None and st.primitive != 'MESH':
         rebuild(fusion_ob)
         return
-    prim.inputs['Rounding'].default_value = st.rounding
-    prim.inputs['Param'].default_value = shape_param(st)
+    if prim is not None:
+        prim.inputs['Rounding'].default_value = st.rounding
+        prim.inputs['Param'].default_value = shape_param(st)
     cnode = tree.nodes.get(f'COLOR_{i}')
     if cnode is not None:
         set_color_node(cnode, st.color)
@@ -1067,7 +1121,12 @@ def build_field_sampler(fusion_ob, sampler_ob, attribute_name='sdf'):
     gparams = b.vector_input((settings.radius_scale, settings.fill_scale, 1.0), 'GLOBAL_PARAMS')
     steps = b.value(float(settings.steps), 'GLOBAL_STEPS')
     position = b.node('GeometryNodeInputPosition').outputs[0]
-    acc, _extras = build_field(b, fusion_ob, shapes, position, gparams, steps)
+    resolution = b.integer(settings.live_resolution(), 'RESOLUTION')
+    pad_radius = b.value(max_radius(fusion_ob), 'PAD_RADIUS')
+    obj_nodes = object_info_nodes(b, shapes)
+    bounds = bounds_pipeline(b, obj_nodes, resolution, pad_radius, gparams)
+    tree.nodes['MESH_DETAIL'].outputs[0].default_value = settings.mesh_detail
+    acc, _extras = build_field(b, fusion_ob, shapes, position, gparams, steps, obj_nodes, bounds)
     store = b.node('GeometryNodeStoreNamedAttribute')
     store.data_type = 'FLOAT'
     store.domain = 'POINT'

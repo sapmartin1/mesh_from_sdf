@@ -478,6 +478,125 @@ def test_placement():
     C.scene.cursor.location = (0, 0, 0)
 
 
+def test_mesh_shapes():
+    print("\n[12] editable / imported mesh shapes")
+    rng = random.Random(11)
+
+    def sdf_at(fusion, pts):
+        return sample_field(fusion, pts)
+
+    # (a) an editable cube matches the analytic box within the voxel size
+    reset_scene()
+    fa = ops.create_fusion(C, Vector((0, 0, 0)))
+    ops.add_shape(C, fa, 'BOX', Vector((0, 0, 0)))
+    fb = ops.create_fusion(C, Vector((0, 0, 0)))
+    cube = ops.add_shape(C, fb, 'MESH', Vector((0, 0, 0)))
+    check(cube.sdf_shape.primitive == 'MESH' and len(cube.data.polygons) == 6 and cube.display_type == 'WIRE', "Mesh button adds an editable cube shape")
+    pts = np.array([[rng.uniform(-1.6, 1.6) for _ in range(3)] for _ in range(4000)])
+    exact = sdf_at(fa, pts)
+    got = sdf_at(fb, pts)
+    near = np.abs(exact) < 0.3
+    voxel = (2.0 + 2 * (0.25 + 0.001)) / 64 * 1.1
+    err = np.abs(got - exact)[near]
+    check(err.max() < 2.0 * voxel, f"mesh cube field matches the analytic box within 2 voxels (max err {err.max():.3f}, voxel {voxel:.3f})")
+    sb = mesh_stats(evaluated_mesh(fb))
+    check(abs(sb['volume'] - 8.0) < 0.25 and sb['islands'] == 1, f"mesh cube fuses to a closed cube ({sb['volume']:.3f} ~ 8)")
+    fb.sdf_fusion.mesh_detail = 2.0
+    err2 = np.abs(sdf_at(fb, pts) - exact)[near]
+    check(err2.max() <= err.max() + 1e-6, f"Mesh Detail 2 is at least as accurate (max err {err2.max():.3f})")
+    fb.sdf_fusion.mesh_detail = 1.0
+
+    # (b) loop-cut style edit: subdivide the vertical edges and push the new loop out
+    bm = bmesh.new()
+    bm.from_mesh(cube.data)
+    vertical = [e for e in bm.edges if abs(e.verts[0].co.z - e.verts[1].co.z) > 1.5]
+    res = bmesh.ops.subdivide_edges(bm, edges=vertical, cuts=1)
+    for v in res['geom_inner']:
+        if isinstance(v, bmesh.types.BMVert):
+            v.co.x *= 1.4
+            v.co.y *= 1.4
+    bm.to_mesh(cube.data)
+    bm.free()
+    cube.data.update()
+    sb2 = mesh_stats(evaluated_mesh(fb))
+    check(sb2['volume'] > 8.0 + 0.8 and sb2['islands'] == 1, f"editing the mesh's vertices changes the fusion live ({sb2['volume']:.3f} > 8)")
+    check(ops.mesh_is_closed(cube.data), "edited cube is still closed")
+
+    # (c) an imported object (icosphere) becomes a shape and blends with a box
+    reset_scene()
+    fusion = ops.create_fusion(C, Vector((0, 0, 0)))
+    box = ops.add_shape(C, fusion, 'BOX', Vector((0, 0, 0)))
+    me = bpy.data.meshes.new('imported')
+    bm = bmesh.new()
+    bmesh.ops.create_icosphere(bm, subdivisions=3, radius=0.9)
+    bm.to_mesh(me)
+    bm.free()
+    imp = bpy.data.objects.new('Imported', me)
+    C.scene.collection.objects.link(imp)
+    imp.location = (1.3, 0.0, 0.7)
+    imp.rotation_euler = Euler((0.4, 0.2, 0.1))
+    for o in C.view_layer.objects:
+        o.select_set(o == imp)
+    C.view_layer.objects.active = imp
+    C.scene.sdf_active_fusion = fusion
+    C.view_layer.update()                     # location/rotation set above must be evaluated first
+    world_before = imp.matrix_world.copy()
+    bpy.ops.sdf_fusion.adopt_selected()
+    C.view_layer.update()
+    check(imp.sdf_shape.enabled and imp.sdf_shape.fusion == fusion and imp.parent == fusion and imp.sdf_shape.primitive == 'MESH', "Use Selected Objects turns the imported mesh into a shape")
+    check((imp.matrix_world.translation - world_before.translation).length < 1e-5, "adopted object keeps its world transform")
+    set_blend(fusion, 0.6)
+    me_f = evaluated_mesh(fusion)
+    st_f = mesh_stats(me_f)
+    check(st_f['volume'] > 8.0 + 1.5 and st_f['islands'] == 1, f"box + imported sphere fuse into one surface ({st_f['volume']:.3f})")
+    co = np.array([v.co[:] for v in me_f.vertices])
+    d_box = sdf_ref.sd_box(co, (1, 1, 1))
+    d_sph = np.linalg.norm(co - np.array([1.3, 0.0, 0.7]), axis=1) - 0.9
+    fillet = int(np.sum((d_box > 0.05) & (d_sph > 0.05)))
+    check(fillet > 50, f"the blend fills a fillet between box and imported mesh ({fillet} verts outside both)")
+
+    # (d) Apply Scale on a mesh shape is simply allowed (geometry is used as is)
+    v_before = mesh_stats(evaluated_mesh(fusion))['volume']
+    imp.scale = (1.3, 1.0, 0.8)
+    v_scaled = mesh_stats(evaluated_mesh(fusion))['volume']
+    bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+    C.view_layer.update()
+    C.evaluated_depsgraph_get()
+    v_applied = mesh_stats(evaluated_mesh(fusion))['volume']
+    check(abs(v_applied - v_scaled) < 0.05 and np.allclose(imp.scale, (1, 1, 1)), f"Apply Scale on a mesh shape keeps the result ({v_scaled:.3f} -> {v_applied:.3f}) and is not undone")
+
+    # (e) release: the object becomes an ordinary object again
+    world_before = imp.matrix_world.copy()
+    bpy.ops.sdf_fusion.release_shape()
+    C.view_layer.update()
+    check(not imp.sdf_shape.enabled and imp.parent is None and not imp.hide_render and imp.display_type == 'TEXTURED', "Release returns the object to a normal mesh")
+    check((imp.matrix_world.translation - world_before.translation).length < 1e-5, "released object stays where it was")
+    check(abs(mesh_stats(evaluated_mesh(fusion))['volume'] - 8.0) < 0.05, "fusion is back to the box alone")
+
+    # (f) Make Editable on a primitive keeps its look
+    sph = ops.add_shape(C, fusion, 'SPHERE', Vector((1.2, 0, 0.6)))
+    sph.scale = (0.8, 0.8, 0.8)
+    v_prim = mesh_stats(evaluated_mesh(fusion))['volume']
+    C.view_layer.objects.active = sph
+    sph.select_set(True)
+    bpy.ops.sdf_fusion.make_editable()
+    v_mesh = mesh_stats(evaluated_mesh(fusion))['volume']
+    check(sph.sdf_shape.primitive == 'MESH' and abs(v_mesh - v_prim) / v_prim < 0.03, f"Make Editable keeps the shape ({v_prim:.3f} -> {v_mesh:.3f})")
+    sph.sdf_shape.primitive = 'SPHERE'
+    check(abs(mesh_stats(evaluated_mesh(fusion))['volume'] - v_prim) < 1e-3, "switching back to Sphere restores the exact primitive")
+
+    # (g) open meshes are detected
+    plane = bpy.data.meshes.new('plane')
+    plane.from_pydata([(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)], [], [(0, 1, 2, 3)])
+    check(not ops.mesh_is_closed(plane) and ops.mesh_is_closed(box.data), "closed-mesh check tells a plane from a cube")
+
+    # (h) convert with a mesh shape
+    sph.sdf_shape.primitive = 'MESH'
+    bpy.ops.sdf_fusion.convert()
+    result = C.active_object
+    check(result.type == 'MESH' and len(result.modifiers) == 0 and mesh_stats(result.data)['islands'] == 1, "Convert to Mesh works with editable shapes")
+
+
 def test_cutters_and_guides():
     print("\n[9] cutters always cut, guide display, Shift+D on a shape")
     reset_scene()
@@ -976,7 +1095,7 @@ def test_timing():
 
 def main():
     t0 = time.perf_counter()
-    for test in (test_field_matches_reference, test_acceptance_flow, test_primitive_volumes, test_placement, test_cutters_and_guides, test_duplicate, test_animation_and_apply, test_ramp_family, test_color_blending, test_material_blending, test_timing):
+    for test in (test_field_matches_reference, test_acceptance_flow, test_primitive_volumes, test_placement, test_mesh_shapes, test_cutters_and_guides, test_duplicate, test_animation_and_apply, test_ramp_family, test_color_blending, test_material_blending, test_timing):
         try:
             t_start = time.perf_counter()
             test()

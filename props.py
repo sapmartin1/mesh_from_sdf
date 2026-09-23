@@ -17,6 +17,8 @@ PRIMITIVE_ITEMS = (
     ('CAPSULE', 'Capsule', 'Capsule along Z (scale XY = radius, Z = half length)', 'MESH_CAPSULE', 5),
     ('PYRAMID', 'Pyramid', 'Square pyramid (scale XY = base half extents, Z = half height)', 'CONE', 6),
     ('PRISM', 'Prism', 'Regular N-gon prism along Z (scale XY = radius, Z = half height)', 'MESH_ICOSPHERE', 7),
+    ('MESH', 'Mesh (editable)', 'Any closed mesh: edit its vertices, loop cut, sculpt or import it, the fusion follows',
+     'MESH_DATA', 8),
 )
 
 OPERATION_ITEMS = (
@@ -96,7 +98,8 @@ def _shape_param(self, context):
 def _shape_primitive(self, context):
     from . import ops
     ob = self.id_data
-    ops.refresh_proxy_mesh(ob)
+    if ob.sdf_shape.primitive != 'MESH':
+        ops.refresh_proxy_mesh(ob)          # switching TO a mesh keeps the current geometry
     if ob.sdf_shape.fusion is not None:
         ops.apply_guide_display(ob.sdf_shape.fusion, ob)
     _shape_rebuild(self, context)
@@ -234,6 +237,11 @@ class SDFFusionSettings(PropertyGroup):
     steps: IntProperty(
         name="Steps", default=3, min=1, max=32,
         description="Number of steps for the Steps blend mode", update=_fusion_values)
+    mesh_detail: FloatProperty(
+        name="Mesh Detail", default=1.0, min=0.25, soft_max=3.0, max=8.0,
+        description="Resolution of mesh shapes' distance fields relative to the fusion grid: "
+                    "1 matches it, 2 is twice as fine (slower)",
+        update=_fusion_values)
     data_version: IntProperty(default=0, options={'HIDDEN'})
     # --- legacy (pre 1.4) settings, only read once by the migration ---
     blend: FloatProperty(default=0.25, min=0.0, options={'HIDDEN'})

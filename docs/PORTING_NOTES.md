@@ -201,9 +201,29 @@ Deviations from upstream, on purpose:
   fusions that used per-shape overrides keep the old seam rule so they look
   the same.
 
+## 3e. 1.5.0: editable and imported mesh shapes (requested by Martin)
+
+* Primitives are analytic formulas; editing their guide meshes could never
+  affect the field, which surprised a mesh modeller.  A new **Mesh** shape
+  kind feeds a real, editable mesh through Blender 5's native *Mesh to SDF
+  Grid* node and samples the grid with *Sample Grid* at the field position,
+  so the same ramp / colour / material operators apply.  Object Info already
+  delivers the geometry in fusion space, so no transform handling (and no
+  scale approximation) is needed; Apply Transform is therefore allowed on
+  mesh shapes and the repair handler skips them.
+* The grid's voxel size is the fusion's own voxel divided by *Mesh Detail*;
+  its narrow band is sized from the largest blend Radius so smooth blends are
+  never truncated by the band.
+* Operators: *Mesh* (editable cube), *Use Selected Objects* (adopt imported
+  or modelled objects, keeping world transforms), *Make Editable* (primitive
+  -> mesh shape, geometry kept), *Release from Fusion* (back to a normal
+  object).  The panel warns when a mesh shape is not closed.
+* Measured: an editable cube's field matches the analytic box within 0.2
+  voxels; Mesh Detail 2 halves that again.
+
 ## 4. Verified
 
-* `tests/run_tests.py` on Blender 5.1.0 / macOS 26 / Apple M5: 169 checks,
+* `tests/run_tests.py` on Blender 5.1.0 / macOS 26 / Apple M5: 187 checks,
   all passing (primitive maths for all 8 primitives, all 15 operation x
   blend combinations, the Phase 1 acceptance flow, analytic volumes, colour
   and material blending, animation drivers, Apply Transform repair,

@@ -34,6 +34,7 @@ PROXY_NAMES = {
     'CAPSULE': "SDF Capsule",
     'PYRAMID': "SDF Pyramid",
     'PRISM': "SDF Prism",
+    'MESH': "SDF Mesh",
 }
 
 
@@ -120,6 +121,9 @@ def apply_guide_display(fusion, shape=None):
         if ob is None:
             continue
         btype = BOUNDS_TYPE.get(ob.sdf_shape.primitive)
+        if ob.sdf_shape.primitive == 'MESH':
+            ob.display_type = 'WIRE'            # editable: always show the real mesh
+            continue
         if mode == 'BOUNDS' and btype is not None:
             ob.display_type = 'BOUNDS'
             ob.display_bounds_type = btype
@@ -179,9 +183,20 @@ def fill_proxy_mesh(mesh, primitive, tube=0.25, top_radius=0.0, sides=6):
     mesh.update()
 
 
+def mesh_is_closed(mesh):
+    """True when every edge has exactly two faces (what Mesh to SDF Grid needs)."""
+    if mesh is None or len(mesh.polygons) == 0:
+        return False
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    closed = all(len(e.link_faces) == 2 for e in bm.edges)
+    bm.free()
+    return closed
+
+
 def refresh_proxy_mesh(shape_ob):
     st = shape_ob.sdf_shape
-    if shape_ob.type != 'MESH' or not st.enabled:
+    if shape_ob.type != 'MESH' or not st.enabled or st.primitive == 'MESH':
         return
     fill_proxy_mesh(shape_ob.data, st.primitive, st.tube, st.top_radius, st.sides)
 
@@ -420,7 +435,7 @@ def add_shape(context, fusion, primitive, location):
     st['color'] = PALETTE[len(fusion.sdf_fusion.shapes) % len(PALETTE)]
     # primitive assignment triggers the proxy refresh; silence it by filling first
     st['primitive'] = [i for i, it in enumerate(PRIMITIVE_ITEMS) if it[0] == primitive][0]
-    fill_proxy_mesh(mesh, primitive, st.tube, st.top_radius, st.sides)
+    fill_proxy_mesh(mesh, 'BOX' if primitive == 'MESH' else primitive, st.tube, st.top_radius, st.sides)
     shape.display_type = 'WIRE'
     shape.hide_render = True
     apply_guide_display(fusion, shape)
@@ -436,6 +451,51 @@ def add_shape(context, fusion, primitive, location):
     fusion.sdf_fusion.active_shape_index = len(fusion.sdf_fusion.shapes) - 1
     nodes.rebuild(fusion)
     return shape
+
+
+def adopt_objects(context, fusion, objects):
+    """Turn existing mesh objects (imported, modelled...) into editable shapes
+    of ``fusion``, keeping their world transform."""
+    context.view_layer.update()
+    adopted = []
+    for ob in objects:
+        if ob is None or ob.type != 'MESH' or ob.sdf_fusion.enabled or ob.sdf_shape.enabled or ob == fusion:
+            continue
+        mw = ob.matrix_world.copy()
+        ob.parent = fusion
+        ob.matrix_parent_inverse = Matrix.Identity(4)
+        ob.matrix_world = mw
+        st = ob.sdf_shape
+        st.enabled = True
+        st.fusion = fusion
+        st['primitive'] = [i for i, it in enumerate(PRIMITIVE_ITEMS) if it[0] == 'MESH'][0]
+        st['color'] = PALETTE[len(fusion.sdf_fusion.shapes) % len(PALETTE)]
+        ob.display_type = 'WIRE'
+        ob.hide_render = True
+        fusion.sdf_fusion.shapes.add().object = ob
+        adopted.append(ob)
+    if adopted:
+        fusion.sdf_fusion.active_shape_index = len(fusion.sdf_fusion.shapes) - 1
+        nodes.rebuild(fusion)
+    return adopted
+
+
+def release_shape(fusion, shape):
+    """Take a shape out of the fusion but keep it as an ordinary object."""
+    refs = fusion.sdf_fusion.shapes
+    for i in range(len(refs) - 1, -1, -1):
+        if refs[i].object == shape or refs[i].object is None:
+            refs.remove(i)
+    fusion.sdf_fusion.active_shape_index = min(fusion.sdf_fusion.active_shape_index, max(0, len(refs) - 1))
+    mw = shape.matrix_world.copy()
+    shape.parent = None
+    shape.matrix_world = mw
+    st = shape.sdf_shape
+    st.enabled = False
+    st.fusion = None
+    shape.display_type = 'TEXTURED'
+    shape.hide_render = False
+    nodes.rebuild(fusion)
 
 
 def remove_shape(fusion, shape):
@@ -552,8 +612,8 @@ def repair_applied_transform(shape):
     field stays consistent.  Returns True when a repair happened."""
     st = shape.sdf_shape
     me = shape.data
-    if me is None:
-        return False
+    if me is None or st.primitive == 'MESH':
+        return False                        # editable meshes are whatever the user makes them
     ref = unit_proxy_vertices(st.primitive, st.tube, st.top_radius, st.sides)
     if len(me.vertices) != len(ref):
         return False
@@ -632,6 +692,64 @@ class SDFF_OT_add_shape(Operator):
             o.select_set(False)
         shape.select_set(True)
         context.view_layer.objects.active = shape
+        return {'FINISHED'}
+
+
+class SDFF_OT_adopt_selected(Operator):
+    bl_idname = "sdf_fusion.adopt_selected"
+    bl_label = "Use Selected as Shapes"
+    bl_description = "Make the selected mesh objects (imported, modelled...) editable shapes of the fusion"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and any(
+            o.type == 'MESH' and not o.sdf_shape.enabled and not o.sdf_fusion.enabled for o in context.selected_objects)
+
+    def execute(self, context):
+        candidates = [o for o in context.selected_objects if o.type == 'MESH' and not o.sdf_shape.enabled and not o.sdf_fusion.enabled]
+        fusion = find_fusion(context)
+        if fusion is None:
+            fusion = create_fusion(context, Vector(candidates[0].matrix_world.translation))
+        else:
+            context.scene.sdf_active_fusion = fusion
+        adopted = adopt_objects(context, fusion, candidates)
+        open_meshes = [o.name for o in adopted if not mesh_is_closed(o.data)]
+        if open_meshes:
+            self.report({'WARNING'}, "Not closed (field may be unreliable): " + ", ".join(open_meshes))
+        self.report({'INFO'}, f"{len(adopted)} object(s) added to {fusion.name}")
+        return {'FINISHED'}
+
+
+class SDFF_OT_make_editable(Operator):
+    bl_idname = "sdf_fusion.make_editable"
+    bl_label = "Make Editable"
+    bl_description = "Turn this primitive into an editable mesh shape (Tab to edit its vertices, loop cut, sculpt)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        sh = active_shape(context)
+        return sh is not None and sh.sdf_shape.primitive != 'MESH'
+
+    def execute(self, context):
+        active_shape(context).sdf_shape.primitive = 'MESH'
+        return {'FINISHED'}
+
+
+class SDFF_OT_release_shape(Operator):
+    bl_idname = "sdf_fusion.release_shape"
+    bl_label = "Release from Fusion"
+    bl_description = "Take the active shape out of the fusion but keep it as a normal object"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return active_shape(context) is not None
+
+    def execute(self, context):
+        shape = active_shape(context)
+        release_shape(shape.sdf_shape.fusion, shape)
         return {'FINISHED'}
 
 
@@ -844,6 +962,9 @@ class SDFF_OT_convert(Operator):
 
 classes = (
     SDFF_OT_add_shape,
+    SDFF_OT_adopt_selected,
+    SDFF_OT_make_editable,
+    SDFF_OT_release_shape,
     SDFF_OT_new_fusion,
     SDFF_OT_remove_shape,
     SDFF_OT_move_shape,

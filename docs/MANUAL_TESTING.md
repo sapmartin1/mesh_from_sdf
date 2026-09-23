@@ -83,6 +83,20 @@ on your M5 Mac with Blender 5.2 and note anything that misbehaves.
 - [ ] Open a scene made with 1.3 or earlier: it looks the same as before and
       the shapes now show Radius / Blend values.
 
+## 1.5 additions (editable meshes)
+
+- [ ] Click **Mesh**, press Tab, Ctrl+R to loop cut, move the loop outward:
+      the fused surface follows while you drag.
+- [ ] Import or model any closed object, select it, click **Use Selected
+      Objects**: it joins the fusion in place, blends with a box, and is still
+      editable with Tab.  An open mesh shows a red warning in the shape box.
+- [ ] Select a Sphere shape, click **Make Editable**, Tab, pull a vertex:
+      the fused sphere deforms.  Set Primitive back to Sphere: exact again.
+- [ ] Raise **Mesh Detail** to 2: edges of mesh shapes get crisper; the
+      viewport stays interactive.
+- [ ] **Release from Fusion** on an imported shape: it becomes a normal,
+      renderable object again where it stands.
+
 ## UI / workflow
 
 - [ ] Clicking a row in the *Shapes* sub-panel selects that shape.
