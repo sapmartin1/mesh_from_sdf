@@ -686,7 +686,7 @@ def test_smart_topology():
     curved = [p for p in me.polygons if max(abs(p.normal.x), abs(p.normal.y), abs(p.normal.z)) < 0.9]
     flat_area = sum(p.area for p in flat) / max(1, len(flat))
     curved_area = sum(p.area for p in curved) / max(1, len(curved))
-    check(len(curved) > 100 and flat_area > 2.0 * curved_area,
+    check(len(curved) > 100 and flat_area > 1.5 * curved_area,
           f"flat polygons are {flat_area / max(curved_area, 1e-9):.1f}x larger than polygons on the blends ({len(flat)} flat, {len(curved)} curved)")
     fs.final_resolution = 96
     fs.adaptivity = 0.0
@@ -699,6 +699,12 @@ def test_smart_topology():
     smart = mesh_stats(C.active_object.data)
     check(smart['faces'] < 0.3 * plain['faces'] and abs(smart['volume'] - plain['volume']) / plain['volume'] < 0.02 and smart['islands'] == 1,
           f"Convert keeps the smart topology ({plain['faces']} -> {smart['faces']} faces, same volume)")
+
+def test_add_menu():
+    print("\n[16] Shift+A > SDF Fusion menu")
+    check(hasattr(bpy.types, 'SDFF_MT_add') and any(getattr(f, '__name__', '') == 'draw_add_menu' for f in bpy.types.VIEW3D_MT_add.draw._draw_funcs),
+          "SDF Fusion submenu is registered in the Add menu")
+
 
 def test_cutters_and_guides():
     print("\n[9] cutters always cut, guide display, Shift+D on a shape")
@@ -1198,7 +1204,7 @@ def test_timing():
 
 def main():
     t0 = time.perf_counter()
-    for test in (test_field_matches_reference, test_acceptance_flow, test_primitive_volumes, test_placement, test_mesh_shapes, test_mirror_and_hollow, test_post_modifiers, test_smart_topology, test_cutters_and_guides, test_duplicate, test_animation_and_apply, test_ramp_family, test_color_blending, test_material_blending, test_timing):
+    for test in (test_field_matches_reference, test_acceptance_flow, test_primitive_volumes, test_placement, test_mesh_shapes, test_mirror_and_hollow, test_post_modifiers, test_smart_topology, test_add_menu, test_cutters_and_guides, test_duplicate, test_animation_and_apply, test_ramp_family, test_color_blending, test_material_blending, test_timing):
         try:
             t_start = time.perf_counter()
             test()

@@ -2,7 +2,7 @@
 """Sidebar UI: a single, modelling-tool style panel."""
 
 import bpy
-from bpy.types import Panel, UIList
+from bpy.types import Menu, Panel, UIList
 
 from . import ops
 
@@ -23,6 +23,30 @@ class SDFF_UL_shapes(UIList):
         row.prop(st, 'include', text="")
         row.label(text=ob.name, icon=icon_name)
         row.prop(st, 'operation', text="", emboss=False, icon_only=True)
+
+
+class SDFF_MT_add(Menu):
+    bl_idname = "SDFF_MT_add"
+    bl_label = "SDF Fusion"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.operator_context = 'INVOKE_REGION_WIN'
+        for ident, label, _desc, icon, _num in (
+                ('BOX', "Box", '', 'MESH_CUBE', 0), ('SPHERE', "Sphere", '', 'MESH_UVSPHERE', 1),
+                ('CYLINDER', "Cylinder", '', 'MESH_CYLINDER', 2), ('TORUS', "Torus", '', 'MESH_TORUS', 3),
+                ('CONE', "Cone", '', 'MESH_CONE', 4), ('CAPSULE', "Capsule", '', 'MESH_CAPSULE', 5),
+                ('PYRAMID', "Pyramid", '', 'CONE', 6), ('PRISM', "Prism", '', 'MESH_ICOSPHERE', 7),
+                ('MESH', "Mesh (editable)", '', 'EDITMODE_HLT', 8)):
+            layout.operator('sdf_fusion.add_shape', text=label, icon=icon).primitive = ident
+        layout.separator()
+        layout.operator('sdf_fusion.adopt_selected', icon='IMPORT')
+        layout.operator('sdf_fusion.new_fusion', icon='ADD')
+
+
+def draw_add_menu(self, context):
+    self.layout.separator()
+    self.layout.menu('SDFF_MT_add', icon='MOD_SMOOTH')
 
 
 class SDFF_PT_main(Panel):
@@ -259,14 +283,16 @@ class SDFF_PT_shapes(Panel):
             layout.label(text="Shapes are combined strictly top to bottom", icon='INFO')
 
 
-classes = (SDFF_UL_shapes, SDFF_PT_main, SDFF_PT_shape_material, SDFF_PT_modifiers, SDFF_PT_shapes)
+classes = (SDFF_UL_shapes, SDFF_MT_add, SDFF_PT_main, SDFF_PT_shape_material, SDFF_PT_modifiers, SDFF_PT_shapes)
 
 
 def register():
     for c in classes:
         bpy.utils.register_class(c)
+    bpy.types.VIEW3D_MT_add.append(draw_add_menu)
 
 
 def unregister():
+    bpy.types.VIEW3D_MT_add.remove(draw_add_menu)
     for c in reversed(classes):
         bpy.utils.unregister_class(c)

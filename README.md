@@ -27,11 +27,12 @@ Blender evaluates natively on every platform.  See
 
 ## Installation
 
-1. Download `sdf_fusion-1.8.0.zip` (or build it, see below).
+1. Download `sdf_fusion-1.9.0.zip` (or build it, see below).
 2. Drag and drop the ZIP into a Blender window, or use
    *Edit > Preferences > Get Extensions > (dropdown) > Install from Disk...*
 3. Enable **SDF Fusion** if it is not enabled automatically.
-4. In the 3D Viewport press **N** and open the **SDF Fusion** tab.
+4. In the 3D Viewport press **N** and open the **SDF Fusion** tab (shapes are
+   also in **Shift+A > SDF Fusion**).
 
 To build the ZIP yourself:
 
