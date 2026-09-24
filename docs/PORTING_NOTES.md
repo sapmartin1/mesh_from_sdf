@@ -389,11 +389,10 @@ Deviations from upstream, on purpose:
 
 * 1.14.0: `tests/run_tests.py` gained `test_smart_topology_exact` (planar
   interiors, exact corner normals on every large polygon, exact sphere, no
-  NaN at Smart Topology 0 / 0.5 / 1.0).  Full run on the final code: 232
-  checks, 228 passed; the 4 failures were the test harness itself (three
-  tests indexed the now corner-domain colour attributes per vertex, one
-  sharp-edge threshold assumed the old staircase); after fixing those, the
-  seven affected tests were re-run: 70 checks, all passing.
+  NaN at Smart Topology 0 / 0.5 / 1.0).  Full run on the final code: 254
+  checks, all passing (an earlier run had 4 failures in the test harness
+  itself: three tests indexed the now corner-domain colour attributes per
+  vertex, one sharp-edge threshold assumed the old staircase).
 * `tests/run_tests.py` on Blender 5.1.0 / macOS 26 / Apple M5: 236 checks,
   all passing (primitive maths for all 8 primitives, all 15 operation x
   blend combinations, the Phase 1 acceptance flow, analytic volumes, colour
