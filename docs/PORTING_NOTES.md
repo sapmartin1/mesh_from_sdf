@@ -294,8 +294,106 @@ Deviations from upstream, on purpose:
   needed.  Silhouettes still show the staircase at low Quality; geometry is
   fixed by Quality or the Precise Edges bake.
 
+## 3j. 1.14.0: Smart Topology made exact (reported by Martin)
+
+* Martin: Smart Topology "affects even the spots where the geometry does
+  not meet, and for the worse".  Reproduced on his scene (cube + sphere,
+  Radius 1, Blend 1, High, Smart Topology 1.0) and measured against the
+  analytic field: cube face interiors were up to 0.095 (two voxels) off
+  their plane with normals up to 19 degrees wrong; 34 of the 59 large
+  polygons, covering more than half of the cube's area, shaded with a
+  crease's diagonal normal.  At 0.0 the same vertices were exact.
+* Root cause 1: the slider was OpenVDB's raw adaptivity.  OpenVDB merges
+  two cells when `1 - dot(n_i, n_j) <= adaptivity`, so 1.0 merges across
+  90-degree creases (and above 1.0 the normal test is skipped entirely); a
+  merged region's single vertex is the average of its cells, hence the
+  off-surface vertices.  Fix: the slider maps to a merge angle, 0..12
+  degrees (adaptivity = 1 - cos), the same angle the Convert bake's limited
+  dissolve already used.  Flat regions merge at any value above 0.
+* Root cause 2: merged vertices (and, less so, all marching-cubes vertices
+  near creases) are off the true surface.  Fix: every vertex is projected
+  onto the real field with two Newton steps (value + central-difference
+  gradient, h = 5e-4; a one-sided difference is zero across a crease's max
+  and left vertices on the crease diagonal unprojected).  The field is now
+  built from shared per-shape input nodes (`field_inputs`) plus one
+  `field_at(position)` copy per probe position, so drivers and value
+  updates still touch a single node per value (primitive Rounding / Param
+  moved to a `PRIM_SETTINGS_i` vector node).
+* Root cause 3: with per-vertex normals, a large polygon reaching a crease
+  smears the crease vertex's diagonal normal across itself.  Fix: normals
+  per face corner from the field (Set Mesh Normal FREE / CORNER).  A corner
+  takes the field normal at its vertex (the projection's second gradient,
+  stored as an attribute, so it costs nothing extra) unless that normal is
+  more than one degree off the field normal a little way into the face (5%
+  of the way to the face centre, at least three stencil widths): then the
+  vertex is on a crease and the corner takes that inner normal, the
+  one-sided limit of its own face's surface.  The threshold can be that
+  small because on a smooth surface the inner normal is within the
+  threshold of the vertex normal anyway, so nothing is ever worse than the
+  threshold; it has to be small because a vertex within a stencil width of
+  a crease line gets an arbitrary mix of the two sides, not the diagonal.  For a flat polygon reaching
+  the crease that is the exact plane normal; on a sub-voxel chamfer face
+  along the crease it is the normal of whichever side the face leans to; a
+  merged face on a curved blend next to a crease gets the normal of its own
+  surface instead of a neighbour's.  Cost: 7 field evaluations per corner.
+  The whole-grid Grid Gradient of 1.13 is gone.
+* Dead ends, measured and reverted: (a) the crease test against the
+  polygon's geometric normal (garbage on sliver polygons, tilted on bent
+  ones: 112-degree jumps on a coarse sphere); (b) "any corner agrees" flat
+  tests on the field's linearity (flat-shaded fillet faces; then junction
+  faces 1.5 degrees off); (c) crease corners taking the mean of the face's
+  other vertex normals (dark dashes where a merged blend face meets a
+  crease); (d) forward differences for the gradient (zero across a crease's
+  max: vertices on the crease diagonal never moved).
+* Crease snapping (live).  After the projection every vertex whose
+  neighbour around a face lies on a surface more than 35 degrees away is
+  moved, within its own tangent plane, onto the neighbour's tangent plane,
+  i.e. onto the crease line (mean over such neighbours; eight passes so a
+  cube corner, where two such lines meet, converges by halves; a candidate
+  is kept only if the real field is zero there within 5% of a voxel, which
+  rejects merely coarse curved surfaces).  Vertices that met on a line or at
+  a corner are welded (Merge by Distance, 2% of a voxel), which also removes
+  the chamfer faces that collapsed there, and one full Newton step settles
+  every vertex on the surface again.  The neighbour's position and stored
+  normal come from Offset Corner in Face / Vertex of Corner / Evaluate at
+  Index, so a pass costs one field value per vertex plus geometry.  Live
+  creases are now straight lines on the exact edge.
+* Blend Materials: the colour / surface attributes moved to the face-corner
+  domain and are sampled at each corner's probe position (5% into its
+  face), so a vertex sitting exactly on a hard seam between two shapes (which
+  snapping now produces) gives each side its own colour instead of a mixed
+  vertex.  The carrier layer for Solid-mode display is a corner layer too.
+* Result on the cube + sphere scene at High, Smart Topology 0 / 0.5 / 1.0:
+  box face interiors |d| <= 6e-8 with corner normals exact to 0.0000
+  degrees; every large polygon on the cube (159 of them) carries the exact
+  plane normal at all corners; sphere vertices |d| = 0 with normals exact
+  to 0.01 degrees; 320 of 331 crease vertices exactly on the edge line, the
+  cube's corner points within 2% of a voxel; the largest vertex error
+  anywhere is 0.0003 (0.8% of a voxel).  Polygons with a corner normal more
+  than 0.5 degrees off their plane cover 0.04% of the cube's area (slivers
+  at the corners and where the blend runs into an edge, where the crease
+  angle fades below the 35-degree snapping threshold).  Across seven stress
+  scenes (cube, cube + sphere, rotated cube + sphere, box - cylinder +
+  torus, mirror + hollow, edited mesh cube + box, six mixed shapes) at all
+  three qualities and three slider values: no NaN, flat vertices within
+  4e-4 of their plane, every vertex within 0.06 voxel of the surface.
+* Cost: on a quiet machine (Martin's Blender renders in the background, so
+  benchmarks alternate 1.13 / 1.14 and take the best round) one live update
+  of the cube + sphere scene with Exact shading takes Low 9 ms, Medium
+  17 ms, High 40 ms against 1.13's 2 / 3 / 14 ms: projection, snapping and
+  per-corner normals evaluate the distance field about 60 more times per
+  vertex.  Still interactive (25 fps at High) and the price of exact
+  geometry; Live Update can be paused on heavy scenes.
+
 ## 4. Verified
 
+* 1.14.0: `tests/run_tests.py` gained `test_smart_topology_exact` (planar
+  interiors, exact corner normals on every large polygon, exact sphere, no
+  NaN at Smart Topology 0 / 0.5 / 1.0).  Full run on the final code: 232
+  checks, 228 passed; the 4 failures were the test harness itself (three
+  tests indexed the now corner-domain colour attributes per vertex, one
+  sharp-edge threshold assumed the old staircase); after fixing those, the
+  seven affected tests were re-run: 70 checks, all passing.
 * `tests/run_tests.py` on Blender 5.1.0 / macOS 26 / Apple M5: 236 checks,
   all passing (primitive maths for all 8 primitives, all 15 operation x
   blend combinations, the Phase 1 acceptance flow, analytic volumes, colour

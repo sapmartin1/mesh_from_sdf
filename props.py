@@ -281,9 +281,10 @@ class SDFFusionSettings(PropertyGroup):
         description="Voxels along the longest axis used by Convert to Mesh")
     adaptivity: FloatProperty(
         name="Smart Topology", default=0.0, min=0.0, max=1.0, subtype='FACTOR',
-        description="Spend polygons only where the surface curves: flat areas get a few large "
-                    "polygons while blends and rounded parts stay dense. 0 = uniform grid mesh, "
-                    "higher = fewer polygons on flat areas (applies to the live mesh and to Convert)",
+        description="Spend polygons only where the surface curves. Any value above 0 merges flat "
+                    "areas into large, exactly planar polygons; the slider sets how much curvature "
+                    "may be merged too (1.0 = neighbouring normals up to 12 degrees apart). Blends "
+                    "and creases stay dense and exact (applies to the live mesh and to Convert)",
         update=_fusion_values)
     blend_colors: BoolProperty(
         name="Blend Materials", default=False,

@@ -20,6 +20,7 @@ upstream GLSL library (see ``sdf_ref.py`` for the readable reference).
 """
 
 import bpy
+import math
 
 GROUP_VERSION = 5
 COLOR_ATTRIBUTE = "Color"
@@ -431,6 +432,14 @@ RAMP_K = 1.0 - 0.7071067811865476        # seam depth of a unit quarter-pipe
 LN2 = 0.6931471805599453
 SEAM_RULES = ('SHARPER', 'AVERAGE', 'SOFTER', 'LATEST')
 MIN_FILL = 0.02
+# Smart Topology: the largest angle between neighbouring surface normals that
+# may be merged into one polygon (slider 1.0).  OpenVDB merges two cells when
+# 1 - dot(n_i, n_j) <= adaptivity, so 12 degrees is adaptivity 0.0219; the raw
+# 0..1 range would merge across 90 degree creases at 1.0.
+SMART_MAX_ANGLE = 12.0
+# Crease snapping passes (each pass moves crease vertices onto the crease
+# line; where two lines meet at a corner the error halves per pass).
+SNAP_PASSES = 8
 
 _OP_INPUTS = [
     ('Distance', 'NodeSocketFloat', 0.0),
@@ -725,26 +734,20 @@ def mirror_bounds(b, settings, mn, mx):
     return b.comb(*lo), b.comb(*hi)
 
 
-def build_field(b, fusion_ob, shapes, position, global_params, global_steps, obj_nodes, bounds):
-    """Emit the distance field for ``shapes``; returns the accumulated socket.
-
-    Shared by the modifier tree and by the test-suite's field sampler.
-    """
-    settings = fusion_ob.sdf_fusion
-    mode, rule = settings.mode, settings.seam_rule
-    acc = None
-    acc_params = None
-    acc_color = None
-    acc_surface = None
-    acc_extra = None
-    acc_emission = None
+def field_inputs(b, fusion_ob, shapes, global_params, obj_nodes, bounds):
+    """Per-shape input nodes, created once per tree: parameters, colours, the
+    rigid inverse transform and (for mesh shapes) the distance grid.  Every
+    evaluation of the field (``field_at``) shares them, so drivers and
+    ``update_shape_values`` only ever have one node per value to touch."""
+    inputs = []
     for i, sh in enumerate(shapes):
         st = sh.sdf_shape
-        color = b.color_input(st.color, f'COLOR_{i}')
-        surface = b.vector_input((st.metallic, st.roughness, st.transmission), f'SURFACE_{i}')
-        extra = b.vector_input((st.ior, st.emission_strength, 0.0), f'EXTRA_{i}')
-        emission = b.color_input(st.emission_color, f'EMISSION_{i}')
-        params = b.vmath('MULTIPLY', b.vector_input((st.radius, st.fill, 0.0), f'PARAMS_{i}'), global_params)
+        d = {'settings': st}
+        d['color'] = b.color_input(st.color, f'COLOR_{i}')
+        d['surface'] = b.vector_input((st.metallic, st.roughness, st.transmission), f'SURFACE_{i}')
+        d['extra'] = b.vector_input((st.ior, st.emission_strength, 0.0), f'EXTRA_{i}')
+        d['emission'] = b.color_input(st.emission_color, f'EMISSION_{i}')
+        d['params'] = b.vmath('MULTIPLY', b.vector_input((st.radius, st.fill, 0.0), f'PARAMS_{i}'), global_params)
         oi = obj_nodes[i]
         if st.primitive == 'MESH':
             # any closed mesh: Blender's own mesh -> SDF grid, sampled at Position.
@@ -754,15 +757,7 @@ def build_field(b, fusion_ob, shapes, position, global_params, global_steps, obj
             b.link(oi.outputs['Geometry'], m2s.inputs['Mesh'])
             b.link(bounds['mesh_voxel'], m2s.inputs['Voxel Size'])
             b.link(bounds['mesh_band'], m2s.inputs['Band Width'])
-            smp = b.node('GeometryNodeSampleGrid')
-            smp.data_type = 'FLOAT'
-            b.link(m2s.outputs['SDF Grid'], smp.inputs['Grid'])
-            b.link(position, smp.inputs['Position'])
-            try:
-                smp.inputs['Interpolation'].default_value = 'TRILINEAR'
-            except Exception:
-                pass
-            d = smp.outputs['Value']
+            d['grid'] = m2s.outputs['SDF Grid']
         else:
             sep = b.node('FunctionNodeSeparateTransform')
             b.link(oi.outputs['Transform'], sep.inputs[0])
@@ -772,43 +767,78 @@ def build_field(b, fusion_ob, shapes, position, global_params, global_steps, obj
             rigid.inputs['Scale'].default_value = (1.0, 1.0, 1.0)
             inv = b.node('FunctionNodeInvertMatrix')
             b.link(rigid.outputs[0], inv.inputs[0])
+            d['inverse'] = inv.outputs['Matrix']
+            d['scale'] = sep.outputs['Scale']
+            d['prim_settings'] = b.vector_input((st.rounding, shape_param(st), 0.0), f'PRIM_SETTINGS_{i}')
+        inputs.append(d)
+    return inputs
+
+
+def field_at(b, fusion_ob, inputs, position, global_steps, with_attributes=True):
+    """Emit the distance field of the fusion at ``position`` (a vector socket)
+    and return ``(distance, (color, surface, extra, emission))``.  Called once
+    for the volume and again for every extra probe position (projection,
+    normals)."""
+    settings = fusion_ob.sdf_fusion
+    mode, rule = settings.mode, settings.seam_rule
+    acc = None
+    acc_params = None
+    acc_color = acc_surface = acc_extra = acc_emission = None
+    for i, d_in in enumerate(inputs):
+        st = d_in['settings']
+        if st.primitive == 'MESH':
+            smp = b.node('GeometryNodeSampleGrid')
+            smp.data_type = 'FLOAT'
+            b.link(d_in['grid'], smp.inputs['Grid'])
+            b.link(position, smp.inputs['Position'])
+            d = smp.outputs['Value']
+        else:
             tp = b.node('FunctionNodeTransformPoint')
             b.link(position, tp.inputs['Vector'])
-            b.link(inv.outputs['Matrix'], tp.inputs['Transform'])
-
-            prim = b.group(primitive_group(st.primitive), f'PRIM_{i}')
+            b.link(d_in['inverse'], tp.inputs['Transform'])
+            prim = b.group(primitive_group(st.primitive))
             b.link(tp.outputs[0], prim.inputs['Position'])
-            b.link(sep.outputs['Scale'], prim.inputs['Scale'])
-            prim.inputs['Rounding'].default_value = st.rounding
-            prim.inputs['Param'].default_value = shape_param(st)
+            b.link(d_in['scale'], prim.inputs['Scale'])
+            rounding, param, _z = b.sep(d_in['prim_settings'])
+            b.link(rounding, prim.inputs['Rounding'])
+            b.link(param, prim.inputs['Param'])
             d = prim.outputs['Distance']
 
         if acc is None:
             acc = d
-            acc_params = params
-            acc_color, acc_surface, acc_extra, acc_emission = color, surface, extra, emission
+            acc_params = d_in['params']
+            acc_color, acc_surface, acc_extra, acc_emission = (
+                d_in['color'], d_in['surface'], d_in['extra'], d_in['emission'])
             continue
-        opn = b.group(op_group(st.operation, mode, rule), f'OP_{i}')
+        opn = b.group(op_group(st.operation, mode, rule))
         b.link(d, opn.inputs['Distance'])
         b.link(acc, opn.inputs['Accumulated'])
-        b.link(params, opn.inputs['Params'])
+        b.link(d_in['params'], opn.inputs['Params'])
         b.link(acc_params, opn.inputs['Accumulated Params'])
         b.link(global_steps, opn.inputs['Steps'])
         acc_params = opn.outputs['Result Params']
-        b.link(color, opn.inputs['Color'])
-        b.link(acc_color, opn.inputs['Accumulated Color'])
-        b.link(surface, opn.inputs['Surface'])
-        b.link(acc_surface, opn.inputs['Accumulated Surface'])
-        b.link(extra, opn.inputs['Extra'])
-        b.link(acc_extra, opn.inputs['Accumulated Extra'])
-        b.link(emission, opn.inputs['Emission'])
-        b.link(acc_emission, opn.inputs['Accumulated Emission'])
-        acc_color = opn.outputs['Result Color']
-        acc_surface = opn.outputs['Result Surface']
-        acc_extra = opn.outputs['Result Extra']
-        acc_emission = opn.outputs['Result Emission']
+        if with_attributes:
+            b.link(d_in['color'], opn.inputs['Color'])
+            b.link(acc_color, opn.inputs['Accumulated Color'])
+            b.link(d_in['surface'], opn.inputs['Surface'])
+            b.link(acc_surface, opn.inputs['Accumulated Surface'])
+            b.link(d_in['extra'], opn.inputs['Extra'])
+            b.link(acc_extra, opn.inputs['Accumulated Extra'])
+            b.link(d_in['emission'], opn.inputs['Emission'])
+            b.link(acc_emission, opn.inputs['Accumulated Emission'])
+            acc_color = opn.outputs['Result Color']
+            acc_surface = opn.outputs['Result Surface']
+            acc_extra = opn.outputs['Result Extra']
+            acc_emission = opn.outputs['Result Emission']
         acc = opn.outputs['Result']
     return acc, (acc_color, acc_surface, acc_extra, acc_emission)
+
+
+def build_field(b, fusion_ob, shapes, position, global_params, global_steps, obj_nodes, bounds):
+    """Emit the distance field for ``shapes``; returns the accumulated socket
+    and the blended attribute sockets.  Shared by the test-suite's sampler."""
+    inputs = field_inputs(b, fusion_ob, shapes, global_params, obj_nodes, bounds)
+    return field_at(b, fusion_ob, inputs, position, global_steps)
 
 
 def max_radius(fusion_ob):
@@ -851,10 +881,31 @@ def rebuild(fusion_ob):
     ex2, ey2, ez2 = bounds['extent']
     voxel = bounds['voxel']
 
-    position = fold_position(b, settings, position)
-    acc, (acc_color, acc_surface, acc_extra, acc_emission) = build_field(
-        b, fusion_ob, shapes, position, gparams, steps, obj_nodes, bounds)
-    acc = apply_shell(b, tree, acc)
+    inputs = field_inputs(b, fusion_ob, shapes, gparams, obj_nodes, bounds)
+
+    def field(at, with_attributes=False):
+        """The (hollowed) distance field evaluated at the vector socket ``at``."""
+        acc_, attrs_ = field_at(b, fusion_ob, inputs, fold_position(b, settings, at), steps, with_attributes)
+        return apply_shell(b, tree, acc_), attrs_
+
+    def value_and_gradient(at, h=5e-4):
+        """The field and its central-difference gradient at ``at`` (7 evaluations).
+
+        Central differences matter: a one-sided difference of a distance
+        field is zero across a crease (the max of two planes), which would
+        leave vertices on a crease diagonal unprojected.
+        """
+        val, _ = field(at)
+        comps = []
+        for axis in range(3):
+            e = [0.0, 0.0, 0.0]
+            e[axis] = h
+            hi, _ = field(b.vmath('ADD', at, tuple(e)))
+            lo, _ = field(b.vmath('SUBTRACT', at, tuple(e)))
+            comps.append(b.math('DIVIDE', b.math('SUBTRACT', hi, lo), 2.0 * h))
+        return val, b.comb(*comps)
+
+    acc, (acc_color, acc_surface, acc_extra, acc_emission) = field(position, True)
 
     def res_axis(extent):
         f = b.math('MAXIMUM', b.math('ADD', b.math('DIVIDE', extent, voxel), 1.0), 2.0)
@@ -887,10 +938,129 @@ def rebuild(fusion_ob):
     g2m = b.node('GeometryNodeGridToMesh', 'GRID_TO_MESH')
     b.link(grid.outputs['Grid'], g2m.inputs['Grid'])
     g2m.inputs['Threshold'].default_value = 0.0
-    b.link(adaptivity, g2m.inputs['Adaptivity'])
+    # slider 0..1 -> merge angle 0..SMART_MAX_ANGLE -> OpenVDB's 1 - cos(angle)
+    merge = b.math('SUBTRACT', 1.0, b.math('COSINE', b.math('MULTIPLY', adaptivity, math.radians(SMART_MAX_ANGLE))))
+    b.link(merge, g2m.inputs['Adaptivity'])
+    mesh_out = g2m.outputs['Mesh']
+
+    # Grid to Mesh puts vertices on the *interpolated* grid's zero level, and
+    # Smart Topology's merged vertices are averages of several cells; two
+    # Newton steps on the real field put every vertex exactly onto the true
+    # surface (flat faces become exactly planar, spheres exactly round).
+    # The second step's value and gradient are stored as attributes so that
+    # they are evaluated once; the gradient doubles as the vertex normal.
+    def project(mesh, val, grad):
+        step = b.math('DIVIDE', val, b.math('MAXIMUM', b.vmath_f('DOT_PRODUCT', grad, grad), 1e-12))
+        setp = b.node('GeometryNodeSetPosition')
+        b.link(mesh, setp.inputs['Geometry'])
+        b.link(b.vmath('SCALE', grad, scale=b.neg(step)), setp.inputs['Offset'])
+        return setp.outputs[0]
+
+    def store(mesh, name, data_type, value):
+        st = b.node('GeometryNodeStoreNamedAttribute')
+        st.data_type = data_type
+        st.domain = 'POINT'
+        st.inputs['Name'].default_value = name
+        b.link(mesh, st.inputs['Geometry'])
+        b.link(value, st.inputs['Value'])
+        return st.outputs[0]
+
+    def named(name, data_type):
+        n = b.node('GeometryNodeInputNamedAttribute')
+        n.data_type = data_type
+        n.inputs['Name'].default_value = name
+        return n.outputs[0]
+
+    val0, grad0 = value_and_gradient(position)
+    mesh_out = project(mesh_out, val0, grad0)
+    val1, grad1 = value_and_gradient(position)
+    mesh_out = store(mesh_out, 'sdff_value', 'FLOAT', val1)
+    mesh_out = store(mesh_out, 'sdff_gradient', 'FLOAT_VECTOR', grad1)
+    mesh_out = project(mesh_out, named('sdff_value', 'FLOAT'), named('sdff_gradient', 'FLOAT_VECTOR'))
+    # the vertex normal: the field's gradient, evaluated a hair off the surface
+    vertex_normal = b.vmath('NORMALIZE', named('sdff_gradient', 'FLOAT_VECTOR'))
+
+    # Crease snapping: a vertex whose neighbour (the next vertex around any
+    # of its faces) lies on a surface more than 35 degrees away is next to a
+    # crease.  It is moved, within its own tangent plane, onto the
+    # neighbour's tangent plane, i.e. onto the crease line; averaged over
+    # all such neighbours (a cube corner converges by halves, so four
+    # passes), and kept only if the result is on the real surface (a true
+    # crease; a merely coarse curved surface is left alone).  The sub-voxel
+    # chamfer faces along a crease then collapse and are deleted, so the
+    # live mesh's creases are exactly straight lines on the exact edge.
+    def on_domain(field_socket, domain, data_type, name=None):
+        n = b.node('GeometryNodeFieldOnDomain', name)
+        n.domain = domain
+        n.data_type = data_type
+        b.link(field_socket, n.inputs[0])
+        return n.outputs[0]
+
+    def at_vertex(field_socket, index, data_type):
+        n = b.node('GeometryNodeFieldAtIndex')
+        n.domain = 'POINT'
+        n.data_type = data_type
+        b.link(index, n.inputs['Index'])
+        b.link(field_socket, n.inputs['Value'])
+        return n.outputs[0]
+
+    for _ in range(SNAP_PASSES):
+        off = b.node('GeometryNodeOffsetCornerInFace')
+        off.inputs['Offset'].default_value = 1
+        b.link(b.node('GeometryNodeInputIndex').outputs[0], off.inputs['Corner Index'])
+        voc = b.node('GeometryNodeVertexOfCorner')
+        b.link(off.outputs[0], voc.inputs['Corner Index'])
+        p_nb = at_vertex(position, voc.outputs[0], 'FLOAT_VECTOR')
+        n_nb = at_vertex(vertex_normal, voc.outputs[0], 'FLOAT_VECTOR')
+        nn = b.vmath_f('DOT_PRODUCT', vertex_normal, n_nb)
+        # direction within this vertex's tangent plane towards the neighbour's plane
+        d = b.vmath('NORMALIZE', b.vmath('SUBTRACT', n_nb, b.vmath('SCALE', vertex_normal, scale=nn)))
+        dn = b.vmath_f('DOT_PRODUCT', d, n_nb)
+        use = b.math('MULTIPLY', b.math('LESS_THAN', nn, math.cos(math.radians(35.0))),
+                     b.math('GREATER_THAN', b.math('ABSOLUTE', dn), 0.2))
+        t = b.math('DIVIDE', b.vmath_f('DOT_PRODUCT', b.vmath('SUBTRACT', p_nb, position), n_nb),
+                   b.math('MAXIMUM', b.math('ABSOLUTE', dn), 1e-6))
+        t = b.math('MULTIPLY', t, b.math('SIGN', dn))
+        target = b.vmath('ADD', position, b.vmath('SCALE', d, scale=t))
+        weight = on_domain(on_domain(use, 'CORNER', 'FLOAT'), 'POINT', 'FLOAT')
+        summed = on_domain(on_domain(b.vmath('SCALE', target, scale=use), 'CORNER', 'FLOAT_VECTOR'), 'POINT', 'FLOAT_VECTOR')
+        candidate = b.vmath('DIVIDE', summed, b.comb(b.math('MAXIMUM', weight, 1e-9), b.math('MAXIMUM', weight, 1e-9), b.math('MAXIMUM', weight, 1e-9)))
+        candidate = b.mix_vector(position, candidate, b.math('GREATER_THAN', weight, 0.0))
+        # accept only a candidate that lies on the real surface (5% of a voxel)
+        residual, _ = field(candidate)
+        accept = b.math('LESS_THAN', b.math('ABSOLUTE', residual), b.math('MULTIPLY', voxel, 0.05))
+        setp = b.node('GeometryNodeSetPosition', 'SNAP_CREASE')
+        b.link(mesh_out, setp.inputs['Geometry'])
+        b.link(b.mix_vector(position, candidate, accept), setp.inputs['Position'])
+        mesh_out = setp.outputs[0]
+    # Vertices that met on a crease line or at a corner are welded (2% of a
+    # voxel), which also removes the chamfer faces that collapsed there.
+    merge = b.node('GeometryNodeMergeByDistance', 'WELD_CREASES')
+    b.link(mesh_out, merge.inputs['Geometry'])
+    b.link(b.math('MULTIPLY', voxel, 0.02), merge.inputs['Distance'])
+    mesh_out = merge.outputs[0]
+    # A snapped vertex can sit a few percent of a voxel off the surface when a
+    # neighbour's normal was taken right at the crease; one full Newton step
+    # settles every vertex on the surface again.  Its gradient replaces the
+    # stored one, so vertex normals belong to the final positions (a vertex
+    # that was snapped onto a crease from half a voxel away would otherwise
+    # keep the normal of where it came from).
+    val2, grad2 = value_and_gradient(position)
+    mesh_out = store(mesh_out, 'sdff_value', 'FLOAT', val2)
+    mesh_out = store(mesh_out, 'sdff_gradient', 'FLOAT_VECTOR', grad2)
+    mesh_out = project(mesh_out, named('sdff_value', 'FLOAT'), named('sdff_gradient', 'FLOAT_VECTOR'))
+    # per-corner probe position: 5% of the way from the corner to its face's
+    # centre, but at least three gradient stencils in (so a probe next to a
+    # crease never straddles it) and at most halfway.  Attributes and normals
+    # sampled there belong to the corner's own face even on a crease vertex.
+    centre = on_domain(on_domain(position, 'FACE', 'FLOAT_VECTOR', 'FACE_CENTRE'), 'CORNER', 'FLOAT_VECTOR')
+    towards = b.vmath('SUBTRACT', centre, position)
+    frac = b.math('MINIMUM', b.math('MAXIMUM', 0.05, b.math('DIVIDE', 1.5e-3, b.math('MAXIMUM', b.vmath_f('LENGTH', towards), 1e-9))), 0.5)
+    inward = b.vmath('ADD', position, b.vmath('SCALE', towards, scale=frac))
+    inward.node.name = 'INWARD_PROBE'
 
     smooth = b.node('GeometryNodeSetShadeSmooth')
-    b.link(g2m.outputs['Mesh'], smooth.inputs[0])
+    b.link(mesh_out, smooth.inputs[0])
     smooth.inputs['Shade Smooth'].default_value = settings.shading != 'FLAT'
     mesh_out = smooth.outputs[0]
     if settings.shading == 'AUTO':
@@ -907,18 +1077,22 @@ def rebuild(fusion_ob):
     if settings.blend_colors:
         # Evaluate the blended colour field at the mesh vertices and store it
         # as a colour attribute the material can read.
+        # Stored per face corner and sampled a little way into the corner's
+        # face, so a vertex sitting exactly on a hard seam between two shapes
+        # still gives each side its own colour.
+        _d, (c_color, c_surface, c_extra, c_emission) = field(inward, True)
         store = b.node('GeometryNodeStoreNamedAttribute', 'STORE_COLOR')
         store.data_type = 'FLOAT_COLOR'
-        store.domain = 'POINT'
+        store.domain = 'CORNER'
         store.inputs['Name'].default_value = COLOR_ATTRIBUTE
         b.link(mesh_out, store.inputs['Geometry'])
-        b.link(acc_color, store.inputs['Value'])
-        for nm, dtype, value in ((SURFACE_ATTRIBUTE, 'FLOAT_VECTOR', acc_surface),
-                                 (EXTRA_ATTRIBUTE, 'FLOAT_VECTOR', acc_extra),
-                                 (EMISSION_ATTRIBUTE, 'FLOAT_COLOR', acc_emission)):
+        b.link(c_color, store.inputs['Value'])
+        for nm, dtype, value in ((SURFACE_ATTRIBUTE, 'FLOAT_VECTOR', c_surface),
+                                 (EXTRA_ATTRIBUTE, 'FLOAT_VECTOR', c_extra),
+                                 (EMISSION_ATTRIBUTE, 'FLOAT_COLOR', c_emission)):
             st_ = b.node('GeometryNodeStoreNamedAttribute')
             st_.data_type = dtype
-            st_.domain = 'POINT'
+            st_.domain = 'CORNER'
             st_.inputs['Name'].default_value = nm
             b.link(store.outputs[0], st_.inputs['Geometry'])
             b.link(value, st_.inputs['Value'])
@@ -944,24 +1118,37 @@ def rebuild(fusion_ob):
         mesh_out = delete.outputs[0]
 
     if settings.shading == 'FIELD':
-        # Exact shading: normals are the gradient of the distance field at each
-        # vertex, so flat faces shade perfectly flat and creases stay crisp,
-        # whatever the grid's staircase geometry does.
-        grad = b.node('GeometryNodeGridGradient')
-        b.link(grid.outputs['Grid'], grad.inputs['Grid'])
-        smpv = b.node('GeometryNodeSampleGrid')
-        smpv.data_type = 'VECTOR'
-        b.link(grad.outputs['Gradient'], smpv.inputs['Grid'])
-        b.link(position, smpv.inputs['Position'])
-        gvec = next(s for s in smpv.outputs if s.enabled)
-        # density = -distance, so the outward normal is minus the gradient
-        nrm = b.vmath('SCALE', b.vmath('NORMALIZE', gvec), scale=-1.0)
+        # Exact shading, per face corner.  A corner normally takes the
+        # field's normal at its vertex, so curved surfaces shade smoothly and
+        # flat faces exactly flat.  At a crease the field's gradient is the
+        # diagonal of the two sides (or an arbitrary mix within a stencil
+        # width of the crease), so a corner whose vertex normal is more than
+        # one degree off the normal a little way into its face takes that
+        # inner normal instead: the one-sided limit of its own face's surface
+        # at the crease.  For a flat polygon reaching the crease that is
+        # exactly the plane normal, so large merged polygons shade perfectly
+        # flat.  The threshold can be this small because swapping in the
+        # inner normal can never be off by more than the threshold itself on
+        # a smooth surface.
+        n_vertex = on_domain(vertex_normal, 'POINT', 'FLOAT_VECTOR', 'N_VERTEX')
+        _s_in, g_in = value_and_gradient(inward)
+        n_inward = on_domain(b.vmath('NORMALIZE', g_in), 'CORNER', 'FLOAT_VECTOR', 'N_INWARD')
+        crease_c = on_domain(b.math('LESS_THAN', b.vmath_f('DOT_PRODUCT', n_vertex, n_inward), math.cos(math.radians(1.0))),
+                             'CORNER', 'FLOAT', 'CORNER_ON_CREASE')
+        nrm = b.mix_vector(n_vertex, n_inward, crease_c)
         setn = b.node('GeometryNodeSetMeshNormal', 'FIELD_NORMALS')
         setn.mode = 'FREE'
-        setn.domain = 'POINT'
+        setn.domain = 'CORNER'
         b.link(mesh_out, setn.inputs['Mesh'])
         b.link(nrm, setn.inputs['Custom Normal'])
         mesh_out = setn.outputs[0]
+
+    # drop the projection's scratch attributes
+    for name in ('sdff_value', 'sdff_gradient'):
+        rm = b.node('GeometryNodeRemoveAttribute')
+        rm.inputs['Name'].default_value = name
+        b.link(mesh_out, rm.inputs['Geometry'])
+        mesh_out = rm.outputs[0]
 
     # Grid to Mesh output carries no material; apply the fusion object's own.
     setmat = b.node('GeometryNodeSetMaterial', 'SET_MATERIAL')
@@ -1025,12 +1212,12 @@ def add_drivers(tree, fusion_ob, shapes):
         if pnode is not None:
             _drive(pnode, 'vector', sh, 'sdf_shape.radius', 0)
             _drive(pnode, 'vector', sh, 'sdf_shape.fill', 1)
-        prim = nodes.get(f'PRIM_{i}')
+        prim = nodes.get(f'PRIM_SETTINGS_{i}')
         if prim is not None:
-            _drive(prim.inputs['Rounding'], 'default_value', sh, 'sdf_shape.rounding')
+            _drive(prim, 'vector', sh, 'sdf_shape.rounding', 0)
             ppath = _param_path(st)
             if ppath:
-                _drive(prim.inputs['Param'], 'default_value', sh, ppath)
+                _drive(prim, 'vector', sh, ppath, 1)
         cnode = nodes.get(f'COLOR_{i}')
         if cnode is not None:
             prop = 'value' if hasattr(cnode, 'value') else 'color'
@@ -1104,13 +1291,12 @@ def update_shape_values(fusion_ob, shape_ob):
     if i < 0:
         return
     st = shape_ob.sdf_shape
-    prim = tree.nodes.get(f'PRIM_{i}')
+    prim = tree.nodes.get(f'PRIM_SETTINGS_{i}')
     if prim is None and st.primitive != 'MESH':
         rebuild(fusion_ob)
         return
     if prim is not None:
-        prim.inputs['Rounding'].default_value = st.rounding
-        prim.inputs['Param'].default_value = shape_param(st)
+        prim.vector = (st.rounding, shape_param(st), 0.0)
     cnode = tree.nodes.get(f'COLOR_{i}')
     if cnode is not None:
         set_color_node(cnode, st.color)
@@ -1142,8 +1328,12 @@ def ensure_color_layer(fusion_ob):
         # one carrier vertex; it is removed again inside the node tree
         me.from_pydata([(0.0, 0.0, 0.0)], [], [])
     ca = me.color_attributes.get(COLOR_ATTRIBUTE)
+    if ca is not None and ca.domain != 'CORNER':
+        me.color_attributes.remove(ca)
+        ca = None
     if ca is None:
-        ca = me.color_attributes.new(COLOR_ATTRIBUTE, 'FLOAT_COLOR', 'POINT')
+        # face-corner domain, like the layer the node tree stores
+        ca = me.color_attributes.new(COLOR_ATTRIBUTE, 'FLOAT_COLOR', 'CORNER')
     try:
         me.color_attributes.active_color = ca
         me.color_attributes.render_color_index = me.color_attributes.find(COLOR_ATTRIBUTE)

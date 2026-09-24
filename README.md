@@ -75,7 +75,7 @@ SDF Fusion
     Mirror X Y Z   reflect the whole fusion across its own axes (model one half)
     Hollow         keep only a wall of this thickness (0 = solid)
     Quality        Low / Medium / High / Custom     (preview resolution)
-    Smart Topology polygons only where the surface curves (flat = few, seams = dense)
+    Smart Topology merge flat areas into large exact polygons; higher = curved areas too
     Live Update    pause the live mesh on heavy scenes
     Shading        Exact (normals from the field) / Auto Smooth / Smooth / Flat
     Blend Materials  per-shape colour and surface values that cross-fade
@@ -156,15 +156,40 @@ is used as is, Apply Scale / Rotation on a mesh shape is simply allowed.
 ### Why edges can look wavy, and what fixes it
 
 The live mesh is extracted from a voxel grid, so a sharp crease is a tiny
-staircase (up to half a voxel).  What you *see*, though, is mostly shading:
-smooth shading turns the staircase into wavy bands, angle-based sharp
-edges turn it into a saw-tooth.  **Shading: Exact** (default) takes the
-normals from the distance field itself, so flat faces shade perfectly flat
-and creases stay crisp at any Quality; only the silhouette still shows the
-grid at low Quality.  Higher **Quality** shrinks the steps, and **Precise
-Edges** on Convert makes hard edges exactly straight.  Mesh shapes are
-limited by their own voxel field: raise **Mesh Detail** (the precise bake
-samples them four times finer automatically).
+staircase (up to half a voxel).  Since 1.14 every vertex of the live mesh
+is then projected onto the true distance field (two Newton steps on the
+real field, not the grid), so flat faces are exactly planar, spheres exactly
+round, and vertices next to a crease are snapped onto the exact edge line
+(the sub-voxel staircase faces along a crease collapse and are removed), so
+live creases are straight lines.  **Shading: Exact** (default) sets one
+normal per face corner from
+the field itself: a flat polygon shades with its exact plane normal at every
+corner (even the corners on a crease, where the field's own gradient is the
+diagonal of the two sides), curved surfaces shade smoothly with exact
+normals.  What remains of the grid is the vertex spacing along a crease
+and the cube's corner points (within a third of a voxel); **Precise Edges**
+on Convert makes those exact too.  Mesh shapes are limited by their own
+voxel field:
+raise **Mesh Detail** (the precise bake samples them four times finer
+automatically).
+
+### Smart Topology
+
+![Smart Topology 1.0 in 1.13 (left) and 1.14 (right)](docs/smart_topology.png)
+
+**Smart Topology** merges neighbouring grid cells whose surface normals
+agree before the mesh is built (OpenVDB's adaptive meshing).  Any value
+above 0 merges flat areas into large polygons; the slider sets how much
+*curvature* may be merged as well, up to neighbouring normals 12 degrees
+apart at 1.0 (the raw OpenVDB range would merge across 90-degree creases at
+1.0, which bent cube faces and moved vertices two voxels off the surface;
+that is what 1.13 did).  Merged vertices are projected back onto the exact
+field like every other vertex, so a cube's faces stay exactly planar and its
+edges exactly where they are at any slider value, while the blends and
+creases keep their dense polygons.  On a curved surface a high value gives
+visibly larger polygons (that is the point of the slider); their normals are
+still exact, so they shade smoothly.  The same slider controls the limited
+dissolve on Convert.
 
 ### Modifiers without converting
 

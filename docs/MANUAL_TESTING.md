@@ -121,6 +121,20 @@ on your M5 Mac with Blender 5.2 and note anything that misbehaves.
       Properties editor jumps to its Modifier tab with Twist / Bend open.
 - [ ] Right-click an object in the viewport: SDF Fusion submenu.
 
+## 1.14 additions (Smart Topology exact)
+
+- [ ] Box + Sphere overlapping, Radius 1, Blend 1, Quality High.  Drag
+      **Smart Topology** from 0 to 1: the cube's faces stay perfectly flat and
+      its edges perfectly crisp at every value; only the polygon count (and,
+      on the sphere, the polygon size) changes.  1.13 bent the faces and
+      rounded the edges at 1.0.
+- [ ] Same scene, Smart Topology 1.0, Wireframe overlay: large polygons on
+      the cube faces, small ones along the blend and along the edges.
+- [ ] Smart Topology 0.5 with Shading Exact, zoom into a cube edge: a
+      hairline chamfer strip along the edge (sub-voxel), no dark notches on
+      the faces.
+- [ ] Low quality, sphere alone: no faceting; the sphere shades smoothly.
+
 ## UI / workflow
 
 - [ ] Clicking a row in the *Shapes* sub-panel selects that shape.

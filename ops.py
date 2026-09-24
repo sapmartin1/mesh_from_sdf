@@ -366,7 +366,7 @@ def shape_material_color(shape):
     return (c[0], c[1], c[2], 1.0)
 
 
-DATA_VERSION = 3
+DATA_VERSION = 4
 _RAMP_K = 1.0 - 1.0 / math.sqrt(2.0)
 
 
@@ -376,6 +376,12 @@ def migrate_fusion(fusion):
     fs = fusion.sdf_fusion
     if fs.data_version >= DATA_VERSION:
         return False
+    if fs.data_version == 3:
+        # 1.14: the modifier tree gained projection, crease snapping and
+        # per-corner normals; the data is unchanged, the tree must be rebuilt.
+        fs['data_version'] = DATA_VERSION
+        nodes.rebuild(fusion)
+        return True
     if fs.data_version == 2:
         # 1.4.0 stored fill with 0.5 = quarter-pipe and 1.0 = flat bevel; the ramp
         # now ends at the quarter-pipe (fill 1.0).  Keep the same curve where one exists.
@@ -777,23 +783,60 @@ def dual_contour_bake(context, fusion, guide_mesh, resolution, mesh_detail=None)
     mesh.from_pydata([tuple(map(float, v)) for v in V], [], faces)
     mesh.validate(verbose=False)
     mesh.update()
-    # 6. colours / surface values: nearest vertex of the marching-cubes mesh
+    # 6. colours / surface values from the live mesh.  Point attributes come
+    # from the nearest live vertex; corner attributes (colour and surface
+    # values, which the live mesh samples a little way into each face so
+    # hard seams stay sharp) come from the nearest live corner probe, matched
+    # against this mesh's own corner probes, so each side of a seam keeps
+    # its own values here too.
     from mathutils.kdtree import KDTree
-    src_attrs = [a for a in guide_mesh.attributes if a.domain == 'POINT' and a.data_type in {'FLOAT_COLOR', 'FLOAT_VECTOR', 'FLOAT'}
-                 and not a.name.startswith('.') and a.name not in {'position'}]
-    if src_attrs and len(guide_mesh.vertices):
-        kd = KDTree(len(guide_mesh.vertices))
-        for i, v in enumerate(guide_mesh.vertices):
-            kd.insert(v.co, i)
+    src_attrs = [a for a in guide_mesh.attributes if a.domain in {'POINT', 'CORNER'}
+                 and a.data_type in {'FLOAT_COLOR', 'FLOAT_VECTOR', 'FLOAT'}
+                 and not a.name.startswith('.') and a.name not in {'position', 'sharp_face', 'custom_normal'}]
+
+    def corner_probes(me):
+        n = len(me.loops)
+        if n == 0:
+            return np.zeros((0, 3))
+        co = np.empty(len(me.vertices) * 3)
+        me.vertices.foreach_get('co', co)
+        co = co.reshape(-1, 3)
+        lv = np.empty(n, dtype=np.int64)
+        me.loops.foreach_get('vertex_index', lv)
+        ps = np.empty(len(me.polygons), dtype=np.int64)
+        me.polygons.foreach_get('loop_start', ps)
+        pt = np.empty(len(me.polygons), dtype=np.int64)
+        me.polygons.foreach_get('loop_total', pt)
+        cf = np.repeat(np.arange(len(ps)), pt)
+        centre = np.zeros((len(ps), 3))
+        np.add.at(centre, cf, co[lv])
+        centre /= np.maximum(pt, 1)[:, None]
+        return co[lv] + 0.05 * (centre[cf] - co[lv])
+
+    def nearest_map(src_points, dst_points):
+        kd = KDTree(len(src_points))
+        for i, v in enumerate(src_points):
+            kd.insert(tuple(v), i)
         kd.balance()
-        nearest = np.array([kd.find(tuple(v))[1] for v in V], dtype=np.int64)
+        return np.array([kd.find(tuple(v))[1] for v in dst_points], dtype=np.int64)
+
+    if src_attrs and len(guide_mesh.vertices):
+        maps = {}
         for a in src_attrs:
+            if a.domain not in maps:
+                if a.domain == 'POINT':
+                    src = np.empty(len(guide_mesh.vertices) * 3)
+                    guide_mesh.vertices.foreach_get('co', src)
+                    maps['POINT'] = nearest_map(src.reshape(-1, 3), V)
+                else:
+                    maps['CORNER'] = nearest_map(corner_probes(guide_mesh), corner_probes(mesh))
+            nearest = maps[a.domain]
             comps = {'FLOAT_COLOR': 4, 'FLOAT_VECTOR': 3, 'FLOAT': 1}[a.data_type]
             key = {'FLOAT_COLOR': 'color', 'FLOAT_VECTOR': 'vector', 'FLOAT': 'value'}[a.data_type]
-            buf = np.empty(len(guide_mesh.vertices) * comps)
+            buf = np.empty(len(a.data) * comps)
             a.data.foreach_get(key, buf)
             buf = buf.reshape(-1, comps)[nearest]
-            na = mesh.attributes.new(a.name, a.data_type, 'POINT')
+            na = mesh.attributes.new(a.name, a.data_type, a.domain)
             na.data.foreach_set(key, buf.ravel())
         if nodes.COLOR_ATTRIBUTE in mesh.color_attributes:
             mesh.color_attributes.active_color = mesh.color_attributes[nodes.COLOR_ATTRIBUTE]

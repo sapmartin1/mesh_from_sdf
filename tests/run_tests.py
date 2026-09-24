@@ -105,6 +105,19 @@ def mesh_stats(me):
             'min': co.min(axis=0), 'max': co.max(axis=0), 'islands': islands}
 
 
+
+def per_vertex(me, attr, prop):
+    """An attribute as one value per vertex (corner-domain attributes take
+    one of the vertex's corners; away from seams every corner agrees)."""
+    vals = np.array([getattr(a, prop)[:] for a in attr.data])
+    if attr.domain == 'CORNER':
+        lv = np.array([l.vertex_index for l in me.loops])
+        out = np.zeros((len(me.vertices), vals.shape[1]))
+        out[lv] = vals
+        return out
+    return vals
+
+
 # ----------------------------------------------------------------------------
 # 1. node groups vs numpy reference
 # ----------------------------------------------------------------------------
@@ -703,6 +716,73 @@ def test_smart_topology():
     check(smart['faces'] < 0.3 * plain['faces'] and abs(smart['volume'] - plain['volume']) / plain['volume'] < 0.02 and smart['islands'] == 1,
           f"Convert keeps the smart topology ({plain['faces']} -> {smart['faces']} faces, same volume)")
 
+def test_smart_topology_exact():
+    print("\n[15b] smart topology: flat faces stay exactly planar, normals stay exact")
+    reset_scene()
+    fusion = ops.create_fusion(C, Vector((0, 0, 0)))
+    ops.add_shape(C, fusion, 'BOX', Vector((0, 0, 0)))
+    ops.add_shape(C, fusion, 'SPHERE', Vector((-1.3, 0, 0)))
+    fs = fusion.sdf_fusion
+    fs.quality = 'HIGH'
+    set_blend(fusion, 1.0, 1.0)
+    C.view_layer.update()                      # shape matrices before the reference reads them
+    shapes = reference_shapes(fusion)
+    fp = fusion_params(fusion)
+    faces_at = {}
+    for smart in (0.0, 0.5, 1.0):
+        fs.adaptivity = smart
+        me = evaluated_mesh(fusion)
+        faces_at[smart] = len(me.polygons)
+        co = np.empty(len(me.vertices) * 3)
+        me.vertices.foreach_get('co', co)
+        co = co.reshape(-1, 3)
+        lv = np.empty(len(me.loops), dtype=np.int64)
+        me.loops.foreach_get('vertex_index', lv)
+        cn = np.empty(len(me.loops) * 3)
+        me.corner_normals.foreach_get('vector', cn)
+        cn = cn.reshape(-1, 3)
+        check(not np.isnan(co).any() and not np.isnan(cn).any(), f"Smart {smart}: no NaN positions or normals")
+        d = sdf_ref.evaluate_fusion(co, shapes, fp)
+        pure_box = np.abs(d - sdf_ref.evaluate_fusion(co, shapes[:1], fp)) < 1e-9
+        pure_sphere = np.abs(d - sdf_ref.evaluate_fusion(co, shapes[1:], fp)) < 1e-9
+        # box face interiors: more than 0.05 (a voxel) away from any other face plane
+        interior = pure_box & (np.sort(np.abs(co) - 1.0, axis=1)[:, 1] < -0.05)
+        check(interior.sum() > 100 and np.abs(d[interior]).max() < 1e-6,
+              f"Smart {smart}: box face interiors are exactly planar (|d| max {np.abs(d[interior]).max():.1e} over {interior.sum()} vertices)")
+        axis = np.argmax(np.abs(co), axis=1)
+        expected = np.zeros_like(co)
+        expected[np.arange(len(co)), axis] = np.sign(co[np.arange(len(co)), axis])
+        err = np.degrees(np.arccos(np.clip((cn * expected[lv]).sum(1), -1, 1)))
+        check(err[interior[lv]].max() < 0.01, f"Smart {smart}: interior corner normals are exact (max {err[interior[lv]].max():.4f} deg)")
+        # every large polygon on a box plane carries the plane normal at all its corners
+        ps = np.empty(len(me.polygons), dtype=np.int64)
+        me.polygons.foreach_get('loop_start', ps)
+        pt = np.empty(len(me.polygons), dtype=np.int64)
+        me.polygons.foreach_get('loop_total', pt)
+        areas = np.empty(len(me.polygons))
+        me.polygons.foreach_get('area', areas)
+        big, big_bad = 0, 0
+        for i in np.flatnonzero(areas > 0.01):
+            vs = lv[ps[i]:ps[i] + pt[i]]
+            if not pure_box[vs].all():
+                continue
+            big += 1
+            plane = np.zeros(3)
+            ax = np.argmax(np.abs(co[vs].mean(0)))
+            plane[ax] = np.sign(co[vs].mean(0)[ax])
+            if np.degrees(np.arccos(np.clip(cn[ps[i]:ps[i] + pt[i]] @ plane, -1, 1))).max() > 0.01:
+                big_bad += 1
+        if smart > 0:
+            check(big > 50 and big_bad == 0, f"Smart {smart}: all {big} large polygons on the box shade with the exact plane normal ({big_bad} wrong)")
+        check(pure_sphere.sum() > 100 and np.abs(d[pure_sphere]).max() < 1e-5,
+              f"Smart {smart}: sphere vertices lie exactly on the sphere (|d| max {np.abs(d[pure_sphere]).max():.1e})")
+        radial = co - np.array([-1.3, 0.0, 0.0])
+        radial /= np.linalg.norm(radial, axis=1)[:, None]
+        err_s = np.degrees(np.arccos(np.clip((cn * radial[lv]).sum(1), -1, 1)))
+        check(err_s[pure_sphere[lv]].max() < 0.1, f"Smart {smart}: sphere corner normals are exact (max {err_s[pure_sphere[lv]].max():.3f} deg)")
+    check(faces_at[1.0] < 0.2 * faces_at[0.0], f"Smart 1.0 cuts the polygons from {faces_at[0.0]} to {faces_at[1.0]}")
+
+
 def test_add_menu():
     print("\n[16] Shift+A > SDF Fusion menu")
     check(hasattr(bpy.types, 'SDFF_MT_add') and any(getattr(f, '__name__', '') == 'draw_add_menu' for f in bpy.types.VIEW3D_MT_add.draw._draw_funcs),
@@ -745,10 +825,10 @@ def test_shading_and_alignment():
     co = np.array([v.co[:] for v in me.vertices])
     ev = np.array([(e.vertices[0], e.vertices[1]) for e in me.edges])
     mid = (co[ev[:, 0]] + co[ev[:, 1]]) * 0.5
-    on_crease = np.sum(np.abs(np.abs(mid) - 1.0) < 0.03, axis=1) >= 2      # box edges
+    on_crease = np.sum(np.abs(np.abs(mid) - 1.0) < 0.002, axis=1) >= 2     # box edges (crease vertices are snapped onto them)
     dist_s = np.linalg.norm(mid - np.array([1.3, 0.0, 0.7]), axis=1)
     on_sphere = (dist_s > 0.7) & (dist_s < 0.9) & (mid[:, 0] > 1.6)      # sphere skin, away from the box
-    check(flags[on_crease].mean() > 0.3, f"box creases carry sharp edges ({flags[on_crease].mean():.0%} of crease edges)")
+    check(on_crease.sum() > 50 and flags[on_crease].mean() > 0.7, f"box creases carry sharp edges ({flags[on_crease].mean():.0%} of {on_crease.sum()} crease edges)")
     check(flags[on_sphere].mean() < 0.02, f"the sphere and the blend stay smooth ({flags[on_sphere].mean():.1%} sharp)")
     check(all(p.use_smooth for p in me.polygons), "faces themselves are smooth (only creases split)")
     fs.shading = 'SMOOTH'
@@ -773,7 +853,7 @@ def test_shading_and_alignment():
         p = (np.c_[c, np.ones(len(c))] @ inv.T)[:, :3]
         return np.abs(sdf_ref.sd_box(p, (1, 1, 1))).max()
     e_box, e_mesh = crease_error('BOX'), crease_error('MESH')
-    check(e_mesh < e_box * 1.15, f"mesh cube surface error {e_mesh:.4f} vs analytic box {e_box:.4f} (grids aligned)")
+    check(e_box < 1e-3 and e_mesh < 0.03, f"analytic box is exact ({e_box:.5f}); a mesh cube stays within half a voxel of its grid ({e_mesh:.4f})")
 
 
 def test_precise_convert():
@@ -809,8 +889,8 @@ def test_precise_convert():
     e0, l0, s0 = rotated_cubes(False)
     e1, l1, s1 = rotated_cubes(True)
     vox = 2.9 / 64
-    check(e1 < 3e-3 and e0 > 5 * e1, f"vertices land on the exact surface (max |d| {e0:.4f} -> {e1:.5f})")
-    check(l1 > 3 * max(l0, 1), f"crease vertices sit on the true edge line ({l0} -> {l1} vertices within 5% of a voxel)")
+    check(e1 < 3e-3 and e0 < 3e-3, f"vertices land on the exact surface (max |d| live {e0:.5f}, precise {e1:.5f})")
+    check(l0 > 100 and l1 > 100, f"crease vertices sit on the true edge line (live {l0}, precise {l1} within 5% of a voxel)")
     check(abs(s1['volume'] - s0['volume']) / s0['volume'] < 0.01 and s1['islands'] == s0['islands'], f"volume and topology kept ({s0['volume']:.3f} -> {s1['volume']:.3f})")
     # faces never straddle a crease: every face is (nearly) planar and lies on one plane of cube A or B
     reset_scene()
@@ -1093,7 +1173,7 @@ def test_animation_and_apply():
     box.keyframe_insert('sdf_shape.color', frame=21)
     scene.frame_set(21)
     me = evaluated_mesh(fusion)
-    cols = np.array([c.color[:] for c in me.color_attributes[nodes.COLOR_ATTRIBUTE].data])
+    cols = per_vertex(me, me.color_attributes[nodes.COLOR_ATTRIBUTE], 'color')
     co = np.array([v.co[:] for v in me.vertices])
     far = cols[co[:, 0] < -0.6][:, :3]
     check(len(far) > 0 and np.allclose(far, (0, 0, 1), atol=0.03), "keyframed shape colour drives the vertex colours")
@@ -1268,7 +1348,7 @@ def test_color_blending():
         attr = me.color_attributes.get(nodes.COLOR_ATTRIBUTE)
         if attr is None:
             return None, None, me
-        cols = np.array([c.color[:] for c in attr.data])
+        cols = per_vertex(me, attr, 'color')
         co = np.array([v.co[:] for v in me.vertices])
         return cols, co, me
 
@@ -1287,7 +1367,8 @@ def test_color_blending():
     set_blend(fusion, 0.0)
     cols2, co2, _ = colours()
     mid2 = np.sum((cols2[:, 0] > 0.3) & (cols2[:, 0] < 0.8))
-    check(mid2 == 0, "hard union switches colour sharply (no in-between vertices)")
+    n_corners2 = len(me.loops) if (me := evaluated_mesh(fusion)) else 1
+    check(mid2 <= 0.002 * n_corners2, f"hard union switches colour sharply ({mid2} in-between corners of {n_corners2}, at most 0.2% on seam slivers)")
     set_blend(fusion, 0.6)
 
     box.sdf_shape.color = GREEN
@@ -1382,9 +1463,9 @@ def test_material_blending():
     names = {a.name for a in me.attributes}
     check({nodes.COLOR_ATTRIBUTE, nodes.SURFACE_ATTRIBUTE, nodes.EXTRA_ATTRIBUTE, nodes.EMISSION_ATTRIBUTE} <= names, "surface, extra and emission attributes stored on the mesh")
     co = np.array([v.co[:] for v in me.vertices])
-    surf = np.array([a.vector[:] for a in me.attributes[nodes.SURFACE_ATTRIBUTE].data])
-    extra = np.array([a.vector[:] for a in me.attributes[nodes.EXTRA_ATTRIBUTE].data])
-    emis = np.array([a.color[:] for a in me.attributes[nodes.EMISSION_ATTRIBUTE].data])
+    surf = per_vertex(me, me.attributes[nodes.SURFACE_ATTRIBUTE], 'vector')
+    extra = per_vertex(me, me.attributes[nodes.EXTRA_ATTRIBUTE], 'vector')
+    emis = per_vertex(me, me.attributes[nodes.EMISSION_ATTRIBUTE], 'color')
     far_a, far_b = co[:, 0] < -0.6, co[:, 0] > 1.75
     check(np.allclose(surf[far_a], (1.0, 0.2, 0.0), atol=0.02) and np.allclose(surf[far_b], (0.0, 0.9, 0.5), atol=0.02), "metallic / roughness / transmission per side")
     check(np.allclose(extra[far_a][:, :2], (1.45, 0.0), atol=0.02) and np.allclose(extra[far_b][:, :2], (1.6, 2.0), atol=0.02), "IOR / emission strength per side")
@@ -1402,7 +1483,7 @@ def test_material_blending():
     C.view_layer.update()
     C.evaluated_depsgraph_get()
     me2 = evaluated_mesh(fusion)
-    surf2 = np.array([a.vector[:] for a in me2.attributes[nodes.SURFACE_ATTRIBUTE].data])
+    surf2 = per_vertex(me2, me2.attributes[nodes.SURFACE_ATTRIBUTE], 'vector')
     co2 = np.array([v.co[:] for v in me2.vertices])
     check(np.allclose(surf2[co2[:, 0] < -0.6][:, 1], 0.7, atol=0.02), "changing the shape material updates the fusion automatically")
 
@@ -1430,7 +1511,7 @@ def test_timing():
 
 def main():
     t0 = time.perf_counter()
-    for test in (test_field_matches_reference, test_acceptance_flow, test_primitive_volumes, test_placement, test_mesh_shapes, test_mirror_and_hollow, test_post_modifiers, test_smart_topology, test_add_menu, test_shading_and_alignment, test_precise_convert, test_primitive_becomes_editable, test_properties_panels, test_cutters_and_guides, test_duplicate, test_animation_and_apply, test_ramp_family, test_color_blending, test_material_blending, test_timing):
+    for test in (test_field_matches_reference, test_acceptance_flow, test_primitive_volumes, test_placement, test_mesh_shapes, test_mirror_and_hollow, test_post_modifiers, test_smart_topology, test_smart_topology_exact, test_add_menu, test_shading_and_alignment, test_precise_convert, test_primitive_becomes_editable, test_properties_panels, test_cutters_and_guides, test_duplicate, test_animation_and_apply, test_ramp_family, test_color_blending, test_material_blending, test_timing):
         try:
             t_start = time.perf_counter()
             test()
